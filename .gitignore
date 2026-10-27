@@ -1,0 +1,18 @@
+# 查询结果与本地数据库文件
+results/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Java / Maven
+target/
+
+# IDE / 系统
+.idea/
+.DS_Store
