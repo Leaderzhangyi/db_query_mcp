@@ -15,10 +15,9 @@ databases:
     dialect: mysql
     hosts:                 # 一组等价主机，新建连接时随机挑一台
       - 10.69.43.11:9030
-      - 10.69.43.12:9030
-      - 10.69.43.13:9030
     username: ${MYSQL_USER}
     password: ${MYSQL_PASSWORD}
     # 库名列表：模型查询时按库名路由到这里
-    catalogs: [ sdls_des, sdp_ial_des, sdp_icl_des, sdp_isl_des, srpts_des ]
+    # catalogs: [ sdls_des, sdp_ial_des, sdp_icl_des, sdp_isl_des, srpts_des ]
+    catalogs: [rcvp_dstg2,dp_ial_dstg2]
     pool_size: 8           # 覆盖全局 pool.size

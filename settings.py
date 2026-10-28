@@ -59,7 +59,6 @@ SUPPORTED_DIALECTS = ("sqlite", "mysql")
 
 class ServerSettings(BaseModel):
     """server 段：服务器自身的信息。"""
-
     name: str = "db-query-server"     # MCP 服务器名（客户端列表里显示的名字）
     transport: str = "stdio"          # stdio：被 MCP 客户端拉起（本地开发）
                                       # http ：独立部署，监听下面的 host:port

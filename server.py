@@ -26,10 +26,11 @@ import logging
 import re
 import sys
 import time
+from typing import Annotated
 
 from fastmcp import Context, FastMCP
 from fastmcp.server.middleware.logging import LoggingMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.responses import FileResponse, PlainTextResponse
 
 from database import list_tables, route as route_database
@@ -91,17 +92,47 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         return await list_tables(settings, db_name, db, catalog)
 
     # ------------------------- 提示词模板 -------------------------
+    def _catalog_menu() -> str:
+        """当前数据源与库清单（渲染进提示词，让用户直接挑）。"""
+        return "\n".join(
+            f"- {name}（{db.dialect}）：{'、'.join(db.catalogs)}"
+            for name, db in settings.databases.items())
+
     @mcp.prompt(
         "query-assistant",
-        description="把自然语言问题转成一条安全的只读 SELECT 并提交。",
+        description="把自然语言问题转成一条安全的只读 SELECT 并提交；"
+                    "会附上当前可用的库，选了库还附该库的表清单。",
     )
-    def query_assistant(question: str, database: str = "") -> str:
+    async def query_assistant(
+        question: str,
+        database: Annotated[str, Field(
+            description="目标库名，留空则先列出库清单让用户选择")] = "",
+    ) -> str:
+        # 没选库：把库清单放进提示词，让模型先请用户挑一个再继续
+        if not database.strip():
+            return (
+                f"用户的问题：{question}\n\n"
+                f"当前可用的库：\n{_catalog_menu()}\n\n"
+                "用户还没选库。请先把上面的库清单展示给用户让其选择，"
+                "确认库名后再把问题转成查询。"
+            )
+        # 选了库：库名必须真实存在，顺带把该库的表清单也附上
+        try:
+            db_name, db, catalog = route_database(settings, database)
+            tables = await list_tables(settings, db_name, db, catalog)
+        except ValueError as e:
+            return (
+                f"用户的问题：{question}\n\n"
+                f"用户填的库名不可用（{e}）。\n\n"
+                f"当前可用的库：\n{_catalog_menu()}\n\n"
+                "请把这份清单展示给用户重新选择。"
+            )
         return (
-            f"请把下面的问题转成一条只读 SELECT 并提交查询。\n"
-            f"目标库：{database or '默认库'}\n"
-            f"问题：{question}\n\n"
-            "要求：先读资源 db://databases 和 db://{库名}/tables 确认库和表名；"
-            "只允许单条 SELECT；能聚合就不取明细。"
+            f"用户的问题：{question}\n\n"
+            f"目标库：{database}，该库的表：{'、'.join(tables)}\n\n"
+            "请据此把问题转成一条只读 SELECT，调用 query_db_async 提交"
+            "（database 参数填上面的库名），再用 get_query_db_async_result 取结果。"
+            "要求：只允许单条 SELECT；能聚合就不取明细。"
         )
 
     # ------------------------- 工具 -------------------------

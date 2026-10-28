@@ -42,22 +42,26 @@ assert s.results.download_base_url.endswith("/results")
 print("① 配置加载 OK：transport=stdio，download_base_url =", s.results.download_base_url)
 
 # ---------- ② prod 覆盖层：真实 mysql 实例 + ${MYSQL_USER} 展开 ----------
+# 只断言不变量（占位符展开、URL 结构、主机来自配置），不锁死具体 IP/库名，
+# 改 config.prod.yaml 不需要改这里
 os.environ["MCP_ENV"] = "prod"
 try:
     s2 = Settings()
     bank = s2.databases["bank"]
-    assert bank.dialect == "mysql" and bank.username == "smoke"
-    assert bank.hosts == ["10.69.43.11:9030", "10.69.43.12:9030", "10.69.43.13:9030"]
-    assert "sdls_des" in bank.catalogs and bank.pool_size == 8
+    assert bank.dialect == "mysql" and bank.username == "smoke"   # ${MYSQL_USER} 展开
+    assert bank.hosts and all(h.count(":") == 1 for h in bank.hosts)
+    assert bank.catalogs
+    assert bank.pool_size == 8
     assert s2.server.transport == "http"
     from database import _engine_url
     url = _engine_url(bank)
     host = url.split("@")[1].split(":")[0]
-    assert url.startswith("mysql+aiomysql://smoke:smoke@") and host.startswith("10.69.43.")
+    assert url.startswith("mysql+aiomysql://smoke:smoke@")
+    assert host in [h.split(":")[0] for h in bank.hosts]          # 主机取自配置
     assert "charset=utf8mb4" in url
 finally:
     os.environ.pop("MCP_ENV")
-print("② prod 配置 OK：mysql 主机组与凭据占位符展开，URL =", url)
+print("② prod 配置 OK：凭据占位符展开，URL =", url)
 
 # ---------- ③ 启动期校验 ----------
 from settings import ResultsSettings, ServerSettings, QuerySettings, DatabaseSettings
@@ -112,13 +116,19 @@ async def flow() -> None:
         assert "orders" in str(tables), tables
         print("⑤ 资源 OK：db://databases ->", str(dbs)[:40], "| db://demo/tables ->", str(tables)[:30])
 
-        # 提示词模板
+        # 提示词模板：不带库 → 返回库清单让用户挑；带库 → 附表清单；错库 → 引导重选
         prompts = {p.name for p in await client.list_prompts()}
         assert "query-assistant" in prompts, prompts
-        rendered = await client.get_prompt("query-assistant",
-                                           {"question": "各状态订单数", "database": "demo"})
-        assert "各状态订单数" in str(rendered)
-        print("⑤ 提示词 OK：query-assistant 可用")
+        r_no_db = str(await client.get_prompt("query-assistant",
+                                              {"question": "各状态订单数"}))
+        assert "当前可用的库" in r_no_db and "demo" in r_no_db
+        r_demo = str(await client.get_prompt("query-assistant",
+                                             {"question": "各状态订单数", "database": "demo"}))
+        assert "orders" in r_demo and "各状态订单数" in r_demo
+        r_bad = str(await client.get_prompt("query-assistant",
+                                            {"question": "x", "database": "nope"}))
+        assert "未知数据库" in r_bad and "demo" in r_bad
+        print("⑤ 提示词 OK：未选库→列库清单；选库→附表清单；错库→引导重选")
 
         r = await client.call_tool("query_db_async", {
             "sql": "SELECT status, COUNT(*) AS cnt, ROUND(SUM(amount), 2) AS total "
