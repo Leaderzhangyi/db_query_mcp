@@ -16,3 +16,4 @@ target/
 # IDE / 系统
 .idea/
 .DS_Store
+logs/

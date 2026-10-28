@@ -26,6 +26,8 @@ import logging
 import re
 import sys
 import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Annotated
 
 from fastmcp import Context, FastMCP
@@ -35,7 +37,7 @@ from starlette.responses import FileResponse, PlainTextResponse
 
 from database import list_tables, route as route_database
 from executor import QueryExecutor
-from settings import Settings
+from settings import BASE_DIR, Settings
 from sql_guard import validate
 
 QUERY_LOG = logging.getLogger("QUERY_LOG")
@@ -219,12 +221,28 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
 
 
 def _setup_logging(settings: Settings) -> None:
-    # stdio 模式下 stdout 属于 MCP 协议通道，日志一律走 stderr
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        stream=sys.stderr,
-    )
+    """三路输出：stderr 控制台 + logs/app.log（全部）+ logs/error.log（WARNING+）。
+
+    目录不存在自动创建；文件按大小轮转，不用引第三方库。
+    force=True 保证重复调用（测试里）也能拿到干净的 root handlers。
+    """
+    cfg = settings.logging
+    logs_dir = Path(cfg.dir)
+    if not logs_dir.is_absolute():
+        logs_dir = BASE_DIR / logs_dir
+    logs_dir.mkdir(parents=True, exist_ok=True)     # ← 没有目录就建
+
+    formatter = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    console = logging.StreamHandler(sys.stderr)     # stdio 模式 stdout 属于协议通道，只能走 stderr
+    app_file = RotatingFileHandler(logs_dir / "app.log", maxBytes=cfg.max_bytes,
+                                   backupCount=cfg.backup_count, encoding="utf-8")
+    err_file = RotatingFileHandler(logs_dir / "error.log", maxBytes=cfg.max_bytes,
+                                   backupCount=cfg.backup_count, encoding="utf-8")
+    err_file.setLevel(logging.WARNING)              # 这个文件只收 WARNING 及以上
+    for handler in (console, app_file, err_file):
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=cfg.level.upper(), force=True,
+                        handlers=[console, app_file, err_file])
 
 
 def _log_startup(settings: Settings) -> None:

@@ -143,6 +143,18 @@ class DatabaseSettings(BaseModel):
 # ============================================================================
 
 
+class LoggingSettings(BaseModel):
+    """logging 段：日志级别与文件输出（logs/ 目录自动创建）。
+
+    两个文件：app.log 收全部正常执行日志；error.log 只收 WARNING 及以上。
+    """
+
+    level: str = "INFO"
+    dir: str = "logs"                # 相对路径按项目根目录解析
+    max_bytes: int = 10485760        # 单文件上限（10MB），超出自动轮转
+    backup_count: int = 5            # 每个文件保留的历史份数（app.log.1 … .5）
+
+
 class Settings(BaseSettings):
     """整棵配置树。入口：Settings()——加载失败（缺环境变量/校验不过）直接抛。"""
 
@@ -154,7 +166,7 @@ class Settings(BaseSettings):
     query: QuerySettings = Field(default_factory=QuerySettings)
     results: ResultsSettings = Field(default_factory=ResultsSettings)
     databases: dict[str, DatabaseSettings] = Field(default_factory=dict)
-    log_level: str = "INFO"
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     @classmethod
     def settings_customise_sources(

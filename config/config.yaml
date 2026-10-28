@@ -10,7 +10,13 @@ server:
   host: 0.0.0.0
   port: 9001
 
-log_level: INFO           # QUERY_LOG 操作日志级别：每次工具调用一行
+# 日志：logs/ 目录自动创建；app.log 收全部，error.log 只收 WARNING 及以上，
+# stderr 控制台同步输出（stdio 模式客户端可见）
+logging:
+  level: INFO
+  dir: logs
+  max_bytes: 10485760       # 单文件 10MB，超出轮转
+  backup_count: 5
 
 # 连接池默认值（每个数据库一个池），单个数据库可用 pool_size 覆盖
 pool:

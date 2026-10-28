@@ -29,7 +29,7 @@ from sqlalchemy.exc import TimeoutError as SaPoolTimeout
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from executor import QueryExecutor, TaskStore
-from server import QUERY_LOG, build
+from server import QUERY_LOG, _setup_logging, build
 from settings import Settings
 from sql_guard import validate
 
@@ -289,5 +289,24 @@ async def download_route_test() -> None:
 
 asyncio.run(download_route_test())
 print("⑨ 下载端点 OK：命中 200 / 未命中 404 / 非法 400，且每次下载都有调用日志")
+
+# ---------- ⑩ 文件日志：自动建目录，info 只进 app.log，warn/error 另进 error.log ----------
+with tempfile.TemporaryDirectory() as tmp:
+    s_log = s.model_copy(deep=True)
+    s_log.logging.dir = tmp                 # 用临时目录，别污染项目
+    _setup_logging(s_log)
+    assert (Path(tmp) / "app.log").exists() and (Path(tmp) / "error.log").exists()
+    QUERY_LOG.info("冒烟-INFO-行")
+    QUERY_LOG.warning("冒烟-WARNING-行")
+    for handler in logging.getLogger().handlers[:]:
+        handler.close()                     # 先关句柄，Windows 才允许删临时目录
+        logging.getLogger().removeHandler(handler)
+    app_text = (Path(tmp) / "app.log").read_text(encoding="utf-8")
+    err_text = (Path(tmp) / "error.log").read_text(encoding="utf-8")
+    assert "冒烟-INFO-行" in app_text and "冒烟-WARNING-行" in app_text
+    assert "冒烟-INFO-行" not in err_text and "冒烟-WARNING-行" in err_text
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                        format="%(name)s %(message)s")   # 恢复冒烟自己的输出
+print("⑩ 文件日志 OK：目录自动创建，正常日志→app.log，告警→error.log")
 
 print("SMOKE PASS")
