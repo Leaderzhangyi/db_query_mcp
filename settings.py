@@ -87,18 +87,32 @@ class LoggingSettings(YmlModel):
 
 # ------------------------- mcp.db 段 -------------------------
 class PoolSettings(YmlModel):
-    """连接池全局参数。结构兼容真实配置；Python 版仅 connection_timeout 生效。"""
+    """连接池全局参数：映射到 SQLAlchemy QueuePool，每实例一个池。
 
-    maximum_pool_size: int = 5
-    minimum_idle: int = 1
-    connection_timeout: int = 3000          # 建连超时（毫秒）
-    validation_timeout: int = 2000
-    idle_timeout: int = 60000
-    max_lifetime: int = 1740000
-    keepalive_time: int = 300000
-    leak_detection_threshold: int = 0
-    initialization_fail_timeout: int = 0
-    auto_commit: bool = True
+    maximum-pool-size  → pool_size（max_overflow=0 固定池；实例可单独覆盖）
+    connection-timeout → pool_timeout（借出等待超时；池满抛错让模型重试）
+    max-lifetime       → pool_recycle（连接最大寿命，到寿自动重建）
+    pool_pre_ping 恒开：借出前 ping，死连接当场换新（覆盖 keepalive/校验的作用）
+    其余 Hikari 项（minimum-idle / idle-timeout / keepalive-time /
+    validation-timeout / leak-detection-threshold / auto-commit）兼容保留。
+    """
+
+    maximum_pool_size: int = 5              # 池上限
+    minimum_idle: int = 1                   # 兼容保留（懒建池，启动不预热）
+    connection_timeout: int = 3000          # 借出等待超时（毫秒）
+    validation_timeout: int = 2000          # 兼容保留
+    idle_timeout: int = 60000               # 兼容保留（pre_ping + recycle 已覆盖）
+    max_lifetime: int = 1740000             # 连接最大寿命
+    keepalive_time: int = 300000            # 兼容保留（pre_ping 已覆盖）
+    leak_detection_threshold: int = 0       # 兼容保留
+    initialization_fail_timeout: int = 0    # 0=懒建池：首次借出才真正连接
+    auto_commit: bool = True                # 兼容保留
+
+    @model_validator(mode="after")
+    def _sanity(self) -> "PoolSettings":
+        if self.maximum_pool_size < 1:
+            raise ValueError("mcp.db.pool：maximum-pool-size 须 ≥1")
+        return self
 
 
 class AsyncSettings(YmlModel):
@@ -127,7 +141,7 @@ class InstanceSettings(YmlModel):
     dialect: str | None = None              # 键名不是方言名时必须显式写
     catalogs: list[str] = Field(default_factory=list)
     driver_class_name: str = ""             # Java 专用，兼容保留
-    maximum_pool_size: int | None = None    # Python 版暂无连接池，兼容保留
+    maximum_pool_size: int | None = None    # 覆盖该实例的池上限（默认用全局值）
     data_source_properties: dict[str, str] = Field(default_factory=dict)
 
 

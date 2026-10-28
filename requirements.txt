@@ -2,5 +2,6 @@ fastmcp>=4.0
 pydantic-settings>=2.4
 PyYAML>=6.0
 sqlglot>=25.0
+SQLAlchemy>=2.0
 # MySQL 实例（prod profile）才需要；本地 sqlite 演示可不装
 # pymysql>=1.1

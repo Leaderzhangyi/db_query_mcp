@@ -141,19 +141,17 @@ class QueryExecutor:
                  instance: InstanceSettings, catalog: str | None) -> None:
         result_file = self._results_dir / f"{query_id}.csv"
         started = time.time()
-        conn = None
         try:
-            conn = database.connect(instance, catalog,
-                                    self._db_cfg.pool.connection_timeout)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            with open(result_file, "w", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([col[0] for col in cursor.description])   # 表头
-                rows = 0
-                for row in cursor:          # 游标逐行吐，不攒大列表——内存与行数无关
-                    writer.writerow(row)
-                    rows += 1
+            # with 退出即归还连接：正常跑完归还复用；中途抛异常则作废，绝不带病回池
+            with database.borrow(self._settings, instance_name, instance, catalog) as conn:
+                result = conn.exec_driver_sql(sql)      # stream_results：游标逐行吐
+                with open(result_file, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(result.keys())      # 表头
+                    rows = 0
+                    for row in result:                  # 不攒大列表——内存与行数无关
+                        writer.writerow(row)
+                        rows += 1
             elapsed_ms = int((time.time() - started) * 1000)
             QUERY_LOG.info("%s %s.%s 行数=%d 耗时=%dms",
                            query_id, instance_name, catalog, rows, elapsed_ms)
@@ -164,9 +162,6 @@ class QueryExecutor:
             reason = str(e).splitlines()[0]
             QUERY_LOG.warning("%s %s.%s 失败 原因=%s", query_id, instance_name, catalog, reason)
             self._store.finish(query_id, status="FAILED", error=reason)
-        finally:
-            if conn is not None:
-                conn.close()
 
     def _janitor_loop(self) -> None:
         while not self._stopping.wait(JANITOR_INTERVAL_SECONDS):

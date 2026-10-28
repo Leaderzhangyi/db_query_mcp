@@ -31,22 +31,19 @@ logging:
 
 mcp:
   db:
-    # 全局池参数。结构保留以兼容真实配置；Python 版暂未启用连接池
-    # （每个查询独立建连，并发由 async.max-pool-size 兜底），以下参数中只有
-    # connection-timeout 生效（建连超时，毫秒）。
+    # 全局连接池参数：映射 SQLAlchemy QueuePool（每实例一个池，实例可用
+    # 自己的 maximum-pool-size 覆盖池上限），借出前自动 ping 保活。
     pool:
-      maximum-pool-size: 5
-      minimum-idle: 1
-      connection-timeout: 3000
-      validation-timeout: 2000
-      idle-timeout: 60000
-      max-lifetime: 1740000
-      keepalive-time: 300000
-      # 慢查询易被误判为泄漏，统一关闭，靠 query-timeout 兜底
-      leak-detection-threshold: 0
-      # 0 = 建池时不预热，首次 getConnection 才真正连接，避免单库抖动拖垮整个服务
-      initialization-fail-timeout: 0
-      auto-commit: true
+      maximum-pool-size: 5        # 池上限（固定池，不超发）
+      minimum-idle: 1             # 兼容保留（懒建池，启动不预热）
+      connection-timeout: 3000    # 借出等待超时；池满报错让模型稍后重试
+      validation-timeout: 2000    # 兼容保留
+      idle-timeout: 60000         # 兼容保留（pre_ping + recycle 已覆盖）
+      max-lifetime: 1740000       # 连接最大寿命（29 分钟），到寿自动重建
+      keepalive-time: 300000      # 兼容保留（pre_ping 已覆盖）
+      leak-detection-threshold: 0 # 兼容保留
+      initialization-fail-timeout: 0   # 0 = 懒建池：首次借出才真正连接
+      auto-commit: true           # 兼容保留
 
     # 异步查询（query_db_async / get_query_db_async_result）：线程池 + 结果暂存区上限
     async:

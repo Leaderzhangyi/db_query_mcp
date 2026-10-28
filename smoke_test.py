@@ -172,4 +172,25 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         ex.close()
 
+# ---------- ⑧ 连接池（SQLAlchemy QueuePool）：借出/归还/池满超时 ----------
+from sqlalchemy import create_engine
+from sqlalchemy.exc import TimeoutError as SaPoolTimeout
+
+with tempfile.TemporaryDirectory() as tmp:
+    engine = create_engine(
+        f"sqlite:///{Path(tmp).as_posix()}/pool.db",
+        pool_size=1, max_overflow=0, pool_timeout=0.3, pool_pre_ping=True,
+    )
+    held = engine.connect()                  # 占满池上限（1）
+    try:
+        engine.connect()
+        raise SystemExit("!! 池上限没拦住")
+    except SaPoolTimeout:
+        pass
+    held.close()                             # 归还
+    with engine.connect() as conn:           # 归还后立刻可再借
+        assert conn.exec_driver_sql("SELECT 1").fetchone() == (1,)
+    engine.dispose()
+    print("⑧ 连接池 OK：借出 / 归还 / 池满超时（SQLAlchemy QueuePool）")
+
 print("SMOKE PASS")

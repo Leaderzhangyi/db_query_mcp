@@ -60,10 +60,11 @@ MCP 客户端 接入（stdio，工作区 `.mcp.json`）：
 
 | 配置段 | 状态 |
 |--------|------|
+| `pool.maximum-pool-size / connection-timeout / max-lifetime` | 生效：映射 SQLAlchemy QueuePool（池上限 / 借出超时 / 最大寿命），借出前自动 ping 保活 |
+| 实例的 `maximum-pool-size` | 生效：覆盖该实例的池上限 |
 | `async.max-pool-size / queue-capacity / ttl-minutes / max-tasks` | 生效（线程池 + 拒绝 + 任务表） |
 | `result.ttl-minutes / max-total-bytes / download-base-url` | 生效（文件回收 + 下载端点 `/results/{file}`） |
-| `pool.connection-timeout` | 生效（建连超时） |
-| `pool` 其余项、实例的 `maximum-pool-size / driver-class-name / data-source-properties`、`async.core-pool-size / keep-alive-seconds` | 结构兼容保留（Python 版暂无连接池，每查询独立建连） |
+| `pool` 其余项、`async.core-pool-size / keep-alive-seconds`、实例的 `driver-class-name / data-source-properties` | 结构兼容保留 |
 | `server.port`、`spring.ai.mcp.server.protocol` | 生效（streamable=HTTP 监听该端口；stdio 不占端口） |
 
 ## 注意
