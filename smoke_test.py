@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -34,12 +35,13 @@ from sql_guard import validate
 
 # ---------- ① 配置：dev 默认合并 sqlite 演示库，download_base_url 来自 config.dev.yaml ----------
 s = Settings()
-assert s.server.transport == "stdio"
+assert s.server.transport in ("stdio", "http")   # 传输方式随 dev 配置走，不锁死
 assert s.server.name == "db-query-server"
 assert "demo" in s.databases and s.databases["demo"].dialect == "sqlite"
 assert s.databases["demo"].catalogs == ["demo"]
 assert s.results.download_base_url.endswith("/results")
-print("① 配置加载 OK：transport=stdio，download_base_url =", s.results.download_base_url)
+print("① 配置加载 OK：transport=%s，download_base_url = %s"
+      % (s.server.transport, s.results.download_base_url))
 
 # ---------- ② prod 覆盖层：真实 mysql 实例 + ${MYSQL_USER} 展开 ----------
 # 只断言不变量（占位符展开、URL 结构、主机来自配置），不锁死具体 IP/库名，
@@ -130,27 +132,53 @@ async def flow() -> None:
         assert "未知数据库" in r_bad and "demo" in r_bad
         print("⑤ 提示词 OK：未选库→列库清单；选库→附表清单；错库→引导重选")
 
+        async def poll(query_id: str):
+            """轮询到出结果为止，返回最终一次的 ToolReply。"""
+            for _ in range(100):
+                r = await client.call_tool("get_query_db_async_result",
+                                           {"query_id": query_id})
+                if r.data.message and "仍在执行" in r.data.message:
+                    await asyncio.sleep(0.05)
+                    continue
+                return r
+            raise SystemExit("!! 轮询超时")
+
+        # 小结果（GROUP BY 2 行 ≤ 5）→ 内联展示，不落文件
         r = await client.call_tool("query_db_async", {
             "sql": "SELECT status, COUNT(*) AS cnt, ROUND(SUM(amount), 2) AS total "
                    "FROM orders GROUP BY status",
             "database": "demo"})
         assert r.data.success, r.data            # 结构化输出：直接拿 ToolReply 字段
-        query_id = r.data.data
-
-        for _ in range(100):
-            r2 = await client.call_tool("get_query_db_async_result", {"query_id": query_id})
-            if r2.data.message and "仍在执行" in r2.data.message:
-                await asyncio.sleep(0.05)
-                continue
-            break
+        r2 = await poll(r.data.data)
         assert r2.data.success, r2.data.message
-        print("⑤ 工具返回:", r2.data.message, "->", r2.data.data)
+        assert r2.data.table is not None
+        assert r2.data.table.columns == ["status", "cnt", "total"]
+        assert 1 <= len(r2.data.table.rows) <= 5          # 行数随数据变，只断言在阈值内
+        assert any("PAID" in str(row) for row in r2.data.table.rows)
+        print("⑤ 小结果内联 OK:", r2.data.table.columns, r2.data.table.rows)
 
-        filename = r2.data.data.split("/")[-1]
+        # 大结果（8 行 > 5）→ 落 CSV 文件
+        rb = await client.call_tool("query_db_async", {
+            "sql": "SELECT id, customer, amount FROM orders LIMIT 8",
+            "database": "demo"})
+        assert rb.data.success, rb.data
+        r2b = await poll(rb.data.data)
+        assert r2b.data.success, r2b.data.message
+        assert r2b.data.table is None and r2b.data.data.endswith(".csv")
+        filename = r2b.data.data.split("/")[-1]
         content = (Path(s.results.dir) / filename).read_text(encoding="utf-8")
-        print("--- 结果文件 ---")
+        print("--- 大结果 CSV 文件 ---")
         print(content)
-        assert "cnt" in content and "PAID" in content
+        assert "customer" in content and len(content.splitlines()) == 9   # 表头 + 8 行
+
+        # results 目录被删也能自愈：写文件前会兜底重建目录
+        shutil.rmtree(s.results.dir, ignore_errors=True)
+        rc = await client.call_tool("query_db_async", {
+            "sql": "SELECT id, customer, amount FROM orders LIMIT 8",
+            "database": "demo"})
+        r2c = await poll(rc.data.data)
+        assert r2c.data.success and r2c.data.data.endswith(".csv")
+        print("⑤ 目录自愈 OK：results 被删后查询照常落盘")
 
         # 失败路径：未知库 / 危险 SQL
         r3 = await client.call_tool("query_db_async",
@@ -253,7 +281,7 @@ async def download_route_test() -> None:
             real = next(p.name for p in sorted(Path(s.results.dir).glob("*.csv"),
                                                key=lambda p: p.stat().st_mtime) if p.stat().st_size > 0)
             r = await client.get(f"/results/{real}")
-            assert r.status_code == 200 and "PAID" in r.text
+            assert r.status_code == 200 and len(r.text.splitlines()) >= 2   # 有表头有数据
         joined = "\n".join(capture.messages)
         assert "下载拒绝" in joined and "下载未命中" in joined and "下载 来源=" in joined
     finally:

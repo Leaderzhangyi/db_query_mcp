@@ -5,7 +5,7 @@
 
 server:
   transport: http
-  port: 9001
+  port: 9000
 
 results:
   download_base_url: ${DOWNLOAD_BASE_URL}

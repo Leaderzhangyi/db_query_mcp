@@ -96,6 +96,10 @@ class QuerySettings(BaseModel):
     task_ttl_minutes: int = 30        # 任务记录保留时长；过期后查询状态按「不存在」处理
     max_tasks: int = 200              # 内存中最多保留的任务数；超出按「最久未访问」淘汰，
                                       # 正在执行（RUNNING）的不会被淘汰
+    inline_max_rows: int = 5          # 结果行数 ≤ 此值：直接内联在工具回复里展示，不落文件；
+                                      # 超过：落 CSV 给下载链接。0 = 永远落文件。
+                                      # 实现上边写盘边缓冲前 N 行，一旦超过阈值立即弃缓冲，
+                                      # 所以内存开销有上界，大查询依旧与行数无关
 
 
 class ResultsSettings(BaseModel):

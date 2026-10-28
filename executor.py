@@ -9,8 +9,9 @@
   query.max-tasks      任务表上限，超出按最久未访问淘汰（RUNNING 的不淘汰）
   results.*            结果文件 TTL 与目录总容量兜底，由后台协程周期回收
 
-行数刻意不回传给模型（只进 QUERY_LOG 服务端日志）——该不该取明细应该在
-写 SQL 时决定，模型一旦知道行数就会纠结要不要拉全量。
+结果返回策略：行数 ≤ query.inline_max_rows 的小结果直接内联在工具回复里
+（边写盘边缓冲，超过阈值立即弃缓冲——内存开销有上界）；更大的结果只给
+文件/下载链接，行数只进服务端日志——模型不知道行数就不会纠结拉全量。
 """
 from __future__ import annotations
 
@@ -154,27 +155,45 @@ class QueryExecutor:
         try:
             # with 退出即归还连接：正常跑完归还复用；中途抛异常则作废，绝不带病回池
             async with database.borrow(self._settings, db_name, db, catalog) as conn:
+                # 目录可能在运行中被清理（启动时建过不算数），写前兜底重建
+                self._results_dir.mkdir(parents=True, exist_ok=True)
                 with open(result_file, "w", encoding="utf-8", newline="") as f:
                     writer = csv.writer(f)
+                    threshold = self._query_cfg.inline_max_rows
 
-                    def write_all(sync_conn) -> int:
+                    def write_all(sync_conn) -> tuple[list[str], int, list | None]:
                         # greenlet 里的同步连接：原始 SQL 直达驱动（不走 text() 的
                         # :参数 解析），stream_results 服务端游标逐行拉取
                         result = sync_conn.execution_options(
                             stream_results=True).exec_driver_sql(sql)
-                        writer.writerow(list(result.keys()))          # 表头
+                        columns = list(result.keys())
+                        writer.writerow(columns)                        # 表头
                         rows = 0
-                        for row in result:      # 不攒大列表——内存与行数无关
+                        # 小结果缓冲：先攒着，一旦超过阈值立即弃掉——
+                        # 内存开销有上界，大查询依旧与行数无关
+                        inline: list | None = [] if threshold > 0 else None
+                        for row in result:
                             writer.writerow(row)
                             rows += 1
-                        return rows
+                            if inline is not None:
+                                inline.append(list(row))
+                                if len(inline) > threshold:
+                                    inline = None
+                        return columns, rows, inline
 
-                    rows = await conn.run_sync(write_all)
+                    columns, rows, inline = await conn.run_sync(write_all)
             elapsed_ms = int((time.time() - started) * 1000)
-            QUERY_LOG.info("%s %s.%s 行数=%d 耗时=%dms",
-                           query_id, db_name, catalog, rows, elapsed_ms)
-            self._store.finish(query_id, status="SUCCESS",
-                               file=result_file.name, rows=rows, elapsed_ms=elapsed_ms)
+            QUERY_LOG.info("%s %s.%s 行数=%d 耗时=%dms%s",
+                           query_id, db_name, catalog, rows, elapsed_ms,
+                           "" if inline is None else " 内联展示")
+            if inline is not None:
+                result_file.unlink(missing_ok=True)   # 小结果不留文件
+                self._store.finish(query_id, status="SUCCESS", rows=rows,
+                                   elapsed_ms=elapsed_ms,
+                                   table={"columns": columns, "rows": inline})
+            else:
+                self._store.finish(query_id, status="SUCCESS", rows=rows,
+                                   elapsed_ms=elapsed_ms, file=result_file.name)
         except BaseException as e:          # 任何漏网异常都不能让任务永远停在 RUNNING
             result_file.unlink(missing_ok=True)   # 半截文件不留尸
             reason = str(e).splitlines()[0]

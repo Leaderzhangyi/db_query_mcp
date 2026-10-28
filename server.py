@@ -43,11 +43,23 @@ QUERY_LOG = logging.getLogger("QUERY_LOG")
 SAFE_FILENAME = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.csv$")
 
 
+class InlineTable(BaseModel):
+    """小结果（行数 ≤ query.inline_max_rows）直接内联展示。"""
+
+    columns: list[str]
+    rows: list[list[str | int | float | None]]
+
+
 class ToolReply(BaseModel):
-    """ 所有工具的统一返回：success / message / data。"""
+    """ 所有工具的统一返回。
+
+    data：queryId / 文件名 / 下载链接（字符串）
+    table：小结果内联表（与 data 互斥——内联时不落文件）
+    """
     success: bool
     message: str = ""
     data: str | None = None
+    table: InlineTable | None = None
 
 
 def _fail(message: str) -> ToolReply:
@@ -66,9 +78,10 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         instructions=(
             "只读数据库查询服务。用法：① 读资源 db://databases 查看可用的库；"
             "② 需要表名时读 db://{库名}/tables；③ 调 query_db_async 提交 SQL，"
-            "拿到 queryId；④ 调 get_query_db_async_result 轮询，成功后给结果文件。"
-            "重要：能用 COUNT / SUM / GROUP BY 在 SQL 里算完的，就不要取全量明细；"
-            "结果落成 CSV 文件，不会整包返回。"
+            "拿到 queryId；④ 调 get_query_db_async_result 轮询取结果。"
+            "结果策略：小结果（约 5 行以内）直接在回复里展示；更大的落成 CSV 文件"
+            "给下载链接。重要：能用 COUNT / SUM / GROUP BY 在 SQL 里算完的，"
+            "就不要取全量明细。"
         ),
     )
     mcp.add_middleware(LoggingMiddleware(logger=QUERY_LOG))   # 每次调用自动一行日志
@@ -140,6 +153,8 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
     async def query_db_async(sql: str, database: str = "", *, ctx: Context) -> ToolReply:
         """异步执行只读 SQL，立即返回查询ID。
         database 填 db://databases 资源里的库名，留空用默认库。
+        结果策略：小结果（约 5 行以内）会在 get_query_db_async_result 里直接展示；
+        更大的落成 CSV 文件给下载链接。
         用法：① 拿到 queryId；② 调 get_query_db_async_result 查状态。"""
         try:
             db_name, db, catalog = route_database(settings, database)
@@ -171,10 +186,16 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
             return _fail(f"查询仍在执行（已提交 {waited} ms），请稍后重试，不要重复提交。")
         if task["status"] == "FAILED":
             return _fail(f"查询失败：{task['error']}\n请修正 SQL 后重新提交。")
-        # 注意：行数刻意不回传！行数只进服务端日志（模型知道行数就会纠结要不要
-        # 拉全量明细，而这件事应该在写 SQL 时决定）
+        inline = task.get("table")
+        if inline:
+            # 小结果：直接把表放在回复里，模型当场展示给用户，不用下载
+            return ToolReply(
+                success=True, table=inline,
+                message=f"查询完成，共 {len(inline['rows'])} 行，结果如下。")
+        # 大结果：只给文件/下载链接。行数刻意不回传——行数只进服务端日志，
+        # 模型不知道行数就不会纠结要不要拉全量明细（该在写 SQL 时决定）
         file_or_url = f"{download_base}/{task['file']}" if is_http else task["file"]
-        return ToolReply(success=True, data=file_or_url, message="查询完成，结果文件已生成。")
+        return ToolReply(success=True, data=file_or_url, message="查询完成，结果已保存为 CSV 文件。")
 
     # ------------------------- http 模式：结果文件下载端点 -------------------------
     # 注意：FastMCP 的 LoggingMiddleware 只覆盖 MCP 协议调用（工具/资源/提示词），
