@@ -43,8 +43,7 @@ SAFE_FILENAME = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.csv$"
 
 
 class ToolReply(BaseModel):
-    """所有工具的统一返回：success / message / data。"""
-
+    """ 所有工具的统一返回：success / message / data。"""
     success: bool
     message: str = ""
     data: str | None = None
