@@ -1,0 +1,20 @@
+# 开发环境（默认）：本地 SQLite 演示库 + stdio，被 MCP 客户端直接拉起时零依赖。
+# 覆盖项会深合并进 application.yml（同 Spring 语义：同名键覆盖、dict 按键合并）。
+
+spring:
+  ai:
+    mcp:
+      server:
+        protocol: stdio       # 本地用 stdio；要看 HTTP 效果改成 streamable
+
+mcp:
+  db:
+    result:
+      download-base-url: http://localhost:9001/results
+
+    instances:
+      sqlite-demo:
+        # 键名不是方言名，必须显式写 dialect（mysql/oracle/postgresql/sqlite）
+        dialect: sqlite
+        url: jdbc:sqlite:demo.db   # 相对路径按本项目目录解析（demo.db 已随仓库附带）
+        catalogs: [ demo ]         # “库”就是整个文件，catalog 仅作路由用

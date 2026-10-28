@@ -6,14 +6,17 @@ from sqlglot import exp
 DANGEROUS_FUNCTIONS = {"sleep", "benchmark", "load_file", "get_lock"}
 
 
-def validate(sql: str) -> str:
-    """校验并净化 SQL：通过则返回重写后的干净 SQL，不通过抛 ValueError。"""
+def validate(sql: str, dialect: str = "mysql") -> str:
+    """校验并净化 SQL：通过则返回重写后的干净 SQL，不通过抛 ValueError。
+
+    dialect 是 sqlglot 方言名（mysql / sqlite / ...），来自数据源实例配置。
+    """
     if not sql or not sql.strip():
         raise ValueError("SQL 不能为空")
 
     # ① 解析成语法树；解析失败说明语法本身就不合法
     try:
-        statements = [s for s in sqlglot.parse(sql, read="mysql") if s]
+        statements = [s for s in sqlglot.parse(sql, read=dialect) if s]
     except sqlglot.errors.ParseError as e:
         raise ValueError(f"SQL 语法无法解析：{str(e).splitlines()[0]}")
 
@@ -44,4 +47,4 @@ def validate(sql: str) -> str:
         raise ValueError("不允许加锁查询（FOR UPDATE / FOR SHARE）")
 
     # 通过：用语法树重新生成 SQL——注释、结尾分号自动消失
-    return stmt.sql(dialect="mysql", comments=False)
+    return stmt.sql(dialect=dialect, comments=False)

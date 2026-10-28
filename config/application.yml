@@ -1,0 +1,78 @@
+# 主配置：与 Java 版 db-mcp-server 的 application.yml 同构（settings.py 读取）。
+#
+# 环境差异（数据源实例、下载地址、协议）不放这里，放 application-{profile}.yml 覆盖。
+# profile 激活方式（优先级从高到低）：
+#   python server.py --spring.profiles.active=prod
+#   SPRING_PROFILES_ACTIVE=prod
+#   本文件 spring.profiles.active 的值（默认 dev）
+
+server:
+  port: 9001
+
+spring:
+  # 默认激活开发环境；生产环境启动时显式覆盖：
+  #   SPRING_PROFILES_ACTIVE=prod
+  #   或 python server.py --spring.profiles.active=prod
+  profiles:
+    active: dev
+  application:
+    name: db-mcp-server
+  ai:
+    mcp:
+      server:
+        name: db-query-server
+        version: 1.0.0
+        protocol: streamable   # streamable=HTTP（监听 server.port）/ stdio
+        type: sync
+
+logging:
+  level:
+    QUERY_LOG: INFO   # 操作日志（每次查询一行：queryId / 库名 / 行数 / 耗时 / 错误原因）
+
+mcp:
+  db:
+    # 全局池参数。结构保留以兼容真实配置；Python 版暂未启用连接池
+    # （每个查询独立建连，并发由 async.max-pool-size 兜底），以下参数中只有
+    # connection-timeout 生效（建连超时，毫秒）。
+    pool:
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 3000
+      validation-timeout: 2000
+      idle-timeout: 60000
+      max-lifetime: 1740000
+      keepalive-time: 300000
+      # 慢查询易被误判为泄漏，统一关闭，靠 query-timeout 兜底
+      leak-detection-threshold: 0
+      # 0 = 建池时不预热，首次 getConnection 才真正连接，避免单库抖动拖垮整个服务
+      initialization-fail-timeout: 0
+      auto-commit: true
+
+    # 异步查询（query_db_async / get_query_db_async_result）：线程池 + 结果暂存区上限
+    async:
+      core-pool-size: 10       # 兼容保留（Python 版固定线程数，见 max-pool-size）
+      max-pool-size: 20        # 工作线程数 = 同时在跑的查询上限
+      # 队列满即拒绝提交（报错让模型稍后重试），不会让请求无限堆积
+      queue-capacity: 64
+      keep-alive-seconds: 60   # 兼容保留
+      # 内存中最多保留多少个任务结果，超出按最久未访问淘汰（执行中的不会被丢）
+      max-tasks: 200
+      # 任务保留时长（分钟），超时后 query_async_result 会返回「不存在或已过期」
+      ttl-minutes: 30
+
+    # 查询结果落盘与下载
+    result:
+      # 必须大于 async.ttl-minutes（30），启动时会交叉校验，否则 map 里查得到、磁盘上已被删
+      ttl-minutes: 40
+      # 目录总容量兜底上限（10GB）：正常靠 TTL 回收，只有 TTL 窗口内堆积海量查询时才触发
+      max-total-bytes: 10737418240
+      # download-base-url 与部署环境相关（Agent 下载文件时使用的对外地址），
+      # 不在这里给默认值，由 application-dev.yml / application-prod.yml 按环境提供；
+      # 缺失时启动失败，避免返回一个下载不了的链接
+
+    # 层级：实例（一个 jdbcUrl + 一套账号密码）→ 该实例下的多个库。
+    # 池的数量 = 实例数，与库的数量无关。
+    # 键名通常直接用数据库类型（mysql / oracle / postgresql），此时 dialect 可省略；
+    # 键名是自定义名字（如 sqlite-demo）时必须显式写 dialect，否则启动即报错。
+    # 具体实例按环境放 application-dev.yml / application-prod.yml。
+    instances: {}
