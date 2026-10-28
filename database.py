@@ -16,9 +16,9 @@ from __future__ import annotations
 import random
 import re
 import threading
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
 from urllib.parse import quote_plus
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
