@@ -116,11 +116,11 @@ class PoolSettings(YmlModel):
 
 
 class AsyncSettings(YmlModel):
-    """异步查询：线程池 + 任务暂存区。"""
+    """异步查询：asyncio 任务池 + 任务暂存区（全链路单事件循环，无锁）。"""
 
     core_pool_size: int = 10                # 兼容保留
-    max_pool_size: int = 20                 # 工作线程数 = 同时在跑的查询上限
-    queue_capacity: int = 64                # 排队上限，满了直接拒绝提交
+    max_pool_size: int = 20                 # 工作协程数 = 同时在跑的查询上限
+    queue_capacity: int = 64                # asyncio.Queue 上限，满了直接拒绝提交
     keep_alive_seconds: int = 60            # 兼容保留
     max_tasks: int = 200                    # 任务表上限，按最久未访问淘汰（RUNNING 不淘汰）
     ttl_minutes: int = 30                   # 任务保留时长

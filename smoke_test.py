@@ -172,25 +172,28 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         ex.close()
 
-# ---------- ⑧ 连接池（SQLAlchemy QueuePool）：借出/归还/池满超时 ----------
-from sqlalchemy import create_engine
+# ---------- ⑧ 连接池（SQLAlchemy 异步 QueuePool）：借出/归还/池满超时 ----------
 from sqlalchemy.exc import TimeoutError as SaPoolTimeout
+from sqlalchemy.ext.asyncio import create_async_engine
 
-with tempfile.TemporaryDirectory() as tmp:
-    engine = create_engine(
-        f"sqlite:///{Path(tmp).as_posix()}/pool.db",
-        pool_size=1, max_overflow=0, pool_timeout=0.3, pool_pre_ping=True,
-    )
-    held = engine.connect()                  # 占满池上限（1）
-    try:
-        engine.connect()
-        raise SystemExit("!! 池上限没拦住")
-    except SaPoolTimeout:
-        pass
-    held.close()                             # 归还
-    with engine.connect() as conn:           # 归还后立刻可再借
-        assert conn.exec_driver_sql("SELECT 1").fetchone() == (1,)
-    engine.dispose()
-    print("⑧ 连接池 OK：借出 / 归还 / 池满超时（SQLAlchemy QueuePool）")
+async def pool_test() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{Path(tmp).as_posix()}/pool.db",
+            pool_size=1, max_overflow=0, pool_timeout=0.3, pool_pre_ping=True,
+        )
+        held = await engine.connect()        # 占满池上限（1）
+        try:
+            await engine.connect()
+            raise SystemExit("!! 池上限没拦住")
+        except SaPoolTimeout:
+            pass
+        await held.close()                   # 归还
+        async with engine.connect() as conn:   # 归还后立刻可再借
+            assert (await conn.exec_driver_sql("SELECT 1")).fetchone() == (1,)
+        await engine.dispose()
+
+asyncio.run(pool_test())
+print("⑧ 连接池 OK：借出 / 归还 / 池满超时（SQLAlchemy 异步引擎 + aiosqlite）")
 
 print("SMOKE PASS")

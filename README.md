@@ -12,8 +12,8 @@
 | `config/application-dev.yml` | dev 覆盖：stdio + 本地 SQLite 演示库 |
 | `config/application-prod.yml` | prod 覆盖：真实 MySQL 实例（凭据走 `${MYSQL_USER}` 等） |
 | `settings.py` | 配置读取（pydantic-settings）：profile 深合并 + `${ENV}` 展开 + 启动期交叉校验 |
-| `database.py` | 数据访问：库名路由到实例、JDBC URL 解析、建连（sqlite / mysql） |
-| `executor.py` | 数据处理：任务表（LRU/TTL）、工作线程池（满即拒绝）、CSV 流式落盘、结果回收 |
+| `database.py` | 数据访问：库名路由到实例、JDBC URL 解析、异步连接池（aiomysql / aiosqlite） |
+| `executor.py` | 数据处理：任务表（LRU/TTL）、asyncio 任务池（满即拒绝）、CSV 流式落盘、结果回收 |
 | `sql_guard.py` | SQL 守卫：sqlglot 解析成语法树，只放行单条只读 SELECT |
 | `server.py` | 入口：装配 + MCP 工具注册 + 运行（stdio / http 按配置切换） |
 | `smoke_test.py` | 冒烟测试（`python smoke_test.py`） |
@@ -60,15 +60,19 @@ MCP 客户端 接入（stdio，工作区 `.mcp.json`）：
 
 | 配置段 | 状态 |
 |--------|------|
-| `pool.maximum-pool-size / connection-timeout / max-lifetime` | 生效：映射 SQLAlchemy QueuePool（池上限 / 借出超时 / 最大寿命），借出前自动 ping 保活 |
+| `pool.maximum-pool-size / connection-timeout / max-lifetime` | 生效：映射 SQLAlchemy 异步引擎连接池（aiomysql/aiosqlite；池上限 / 借出超时 / 最大寿命），借出前自动 ping 保活 |
 | 实例的 `maximum-pool-size` | 生效：覆盖该实例的池上限 |
-| `async.max-pool-size / queue-capacity / ttl-minutes / max-tasks` | 生效（线程池 + 拒绝 + 任务表） |
+| `async.max-pool-size / queue-capacity / ttl-minutes / max-tasks` | 生效（asyncio 任务池 + 拒绝 + 任务表，全链路无锁） |
 | `result.ttl-minutes / max-total-bytes / download-base-url` | 生效（文件回收 + 下载端点 `/results/{file}`） |
 | `pool` 其余项、`async.core-pool-size / keep-alive-seconds`、实例的 `driver-class-name / data-source-properties` | 结构兼容保留 |
 | `server.port`、`spring.ai.mcp.server.protocol` | 生效（streamable=HTTP 监听该端口；stdio 不占端口） |
 
 ## 注意
 
+- 全链路 asyncio（stdio / http 两种传输都跑在事件循环上）：连接池是 SQLAlchemy
+  异步引擎（`SQLAlchemy[asyncio]` 依赖 greenlet），mysql 驱动 `aiomysql`、
+  sqlite 驱动 `aiosqlite`。
+- 查询经 `run_sync` + `stream_results` 服务端游标逐行拉取（原始 SQL 直达驱动，
+  不走 `text()` 的 `:绑定参数` 解析）：内存与行数无关。
 - 本机 9001 端口被 `SpaceAgent.exe`（终端安全软件）占用，演示 http 模式时
   需在 profile 里覆盖 `server.port`。
-- mysql 方言用 SSCursor 服务端游标逐行拉取，与 sqlite 一致：内存与行数无关。

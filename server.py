@@ -13,8 +13,8 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import queue
 import re
 import sys
 import time
@@ -50,7 +50,7 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
     mcp = FastMCP(settings.spring.ai.mcp.server.name)
 
     @mcp.tool
-    def query_db_async(sql: str, database: str = "") -> dict:
+    async def query_db_async(sql: str, database: str = "") -> dict:
         """异步执行只读 SQL，立即返回查询ID（JSON：success/message/data）。
         database 填配置里的库名（如 demo / sdls_des），留空用默认库。
         用法：① 拿到 queryId；② 调 get_query_db_async_result 查状态。
@@ -61,15 +61,15 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         except ValueError as e:
             return _fail(f"{e}\n请修正后重试。")
         try:
-            query_id = executor.submit(safe_sql, instance_name, instance, catalog)
-        except queue.Full:
+            query_id = await executor.submit(safe_sql, instance_name, instance, catalog)
+        except asyncio.QueueFull:
             return _fail(f"当前排队已满（queue-capacity={db_cfg.async_.queue_capacity}），"
                          "请稍后重试，不要重复提交。")
         return _ok(query_id, f"查询已提交，queryId={query_id}。"
                              "稍后调用 get_query_db_async_result 传入该 queryId 获取结果。")
 
     @mcp.tool
-    def get_query_db_async_result(query_id: str) -> dict:
+    async def get_query_db_async_result(query_id: str) -> dict:
         """按 queryId 查询任务状态。RUNNING→等几秒再查（不要重复提交）；
         FAILED→附原因；SUCCESS→返回结果文件（http 模式为下载链接）。"""
         task = executor.get((query_id or "").strip())

@@ -31,8 +31,9 @@ logging:
 
 mcp:
   db:
-    # 全局连接池参数：映射 SQLAlchemy QueuePool（每实例一个池，实例可用
-    # 自己的 maximum-pool-size 覆盖池上限），借出前自动 ping 保活。
+    # 全局连接池参数：映射 SQLAlchemy 异步引擎（aiomysql/aiosqlite，
+    # 每实例一个池，实例可用自己的 maximum-pool-size 覆盖池上限），
+    # 借出前自动 ping 保活。
     pool:
       maximum-pool-size: 5        # 池上限（固定池，不超发）
       minimum-idle: 1             # 兼容保留（懒建池，启动不预热）
@@ -45,10 +46,11 @@ mcp:
       initialization-fail-timeout: 0   # 0 = 懒建池：首次借出才真正连接
       auto-commit: true           # 兼容保留
 
-    # 异步查询（query_db_async / get_query_db_async_result）：线程池 + 结果暂存区上限
+    # 异步查询（query_db_async / get_query_db_async_result）：
+    # asyncio 任务池 + 结果暂存区上限（全链路单事件循环，无锁）
     async:
-      core-pool-size: 10       # 兼容保留（Python 版固定线程数，见 max-pool-size）
-      max-pool-size: 20        # 工作线程数 = 同时在跑的查询上限
+      core-pool-size: 10       # 兼容保留
+      max-pool-size: 20        # 工作协程数 = 同时在跑的查询上限
       # 队列满即拒绝提交（报错让模型稍后重试），不会让请求无限堆积
       queue-capacity: 64
       keep-alive-seconds: 60   # 兼容保留

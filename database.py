@@ -1,32 +1,35 @@
-"""数据访问层：库名路由 + 连接池。
+"""数据访问层：库名路由 + 异步连接池。
 
-连接池直接用 SQLAlchemy 的 QueuePool（Python 生态里 Hikari 的等价物），
-一个 create_engine 配齐全部语义，不手搓：
+全链路 asyncio（FastMCP 的 stdio/http 传输都跑在事件循环上），
+连接池用 SQLAlchemy 的异步引擎（AsyncAdaptedQueuePool），一个
+create_async_engine 配齐全部语义：
   maximum-pool-size  → pool_size（max_overflow=0：固定池，上限即池大小）
   connection-timeout → pool_timeout（借出等待超时；池满抛 TimeoutError 让模型重试）
   max-lifetime       → pool_recycle（连接最大寿命，到寿自动重建）
   pool_pre_ping=True → 借出前先 ping，死连接当场换新，空闲保活一并覆盖
+驱动：mysql → aiomysql，sqlite → aiosqlite（本地开发自测用）。
 实例可用自己的 maximum-pool-size 覆盖池上限。
 
-借还规则即 SQLAlchemy 语义：with 正常退出归还复用；抛异常连接作废不回池
-（流式查询中途出错后连接状态不可信）。查询统一 stream_results=True，
-mysql 走 SSCursor、sqlite 走懒游标：逐行拉取，内存与行数无关。
+借还规则即 SQLAlchemy 语义：with 正常退出归还复用；抛异常连接作废不回池。
+查询走 run_sync + stream_results 服务端游标：原始 SQL 直达驱动（不经过
+text() 的 :绑定参数 解析），逐行拉取，内存与行数无关。
 """
 from __future__ import annotations
 
 import random
 import re
 import threading
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator
 from urllib.parse import quote_plus
 
-from sqlalchemy import Connection, Engine, create_engine
+from sqlalchemy import Connection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from settings import BASE_DIR, InstanceSettings, Settings
 
-_engines: dict[str, Engine] = {}
+_engines: dict[str, AsyncEngine] = {}
 _engines_lock = threading.Lock()
 
 
@@ -54,30 +57,22 @@ def route(settings: Settings, database: str) -> tuple[str, InstanceSettings, str
     raise ValueError(f"未知数据库 {database!r}，可用的库：{choices}")
 
 
-@contextmanager
-def borrow(settings: Settings, instance_name: str,
-           instance: InstanceSettings, catalog: str | None) -> Iterator[Connection]:
-    """借连接的上下文管理器：
-
-        with database.borrow(settings, name, instance, catalog) as conn:
-            result = conn.exec_driver_sql(sql)
-            for row in result: ...
-
-    exec_driver_sql 直接把 SQL 交给驱动，不走 text() 的 :参数 解析，
-    避免 SQL 里的冒号被误当绑定参数。
-    """
+@asynccontextmanager
+async def borrow(settings: Settings, instance_name: str,
+                 instance: InstanceSettings, catalog: str | None) -> AsyncIterator[AsyncConnection]:
+    """借连接的异步上下文管理器。执行查询用 conn.run_sync(...)（见 executor）。"""
     engine = _get_engine(settings, instance_name, instance)
-    with engine.connect() as conn:
+    async with engine.connect() as conn:
         if instance.dialect == "mysql" and catalog:
             # 切库（对应 Java 版 setCatalog）；catalog 来自已校验的配置，再防一手反引号
             if not re.fullmatch(r"[0-9A-Za-z_]+", catalog):
                 raise ValueError(f"库名含非法字符：{catalog!r}")
-            conn.exec_driver_sql(f"USE `{catalog}`")
-        yield conn.execution_options(stream_results=True)
+            await conn.exec_driver_sql(f"USE `{catalog}`")
+        yield conn
 
 
 def _get_engine(settings: Settings, instance_name: str,
-                instance: InstanceSettings) -> Engine:
+                instance: InstanceSettings) -> AsyncEngine:
     """每实例一个引擎（= 一个连接池），首次使用才创建（懒建池）。"""
     engine = _engines.get(instance_name)
     if engine is not None:
@@ -87,7 +82,7 @@ def _get_engine(settings: Settings, instance_name: str,
         if engine is None:
             pool_cfg = settings.mcp.db.pool
             try:
-                engine = create_engine(
+                engine = create_async_engine(
                     _engine_url(instance),
                     pool_size=instance.maximum_pool_size or pool_cfg.maximum_pool_size,
                     max_overflow=0,                                # 固定池：上限即 pool_size
@@ -98,19 +93,22 @@ def _get_engine(settings: Settings, instance_name: str,
                                   if instance.dialect == "mysql" else {}),
                 )
             except ModuleNotFoundError as e:
-                raise RuntimeError(f"MySQL 实例需要驱动：pip install pymysql（{e}）") from e
+                raise RuntimeError(
+                    f"{instance.dialect} 实例需要异步驱动："
+                    f"pip install {'aiomysql' if instance.dialect == 'mysql' else 'aiosqlite'}"
+                    f"（{e}）") from e
             _engines[instance_name] = engine
         return engine
 
 
 def _engine_url(instance: InstanceSettings) -> str:
-    """JDBC URL → SQLAlchemy URL：实例配置保持与 Java 版同一份，两边通用。"""
+    """JDBC URL → SQLAlchemy 异步 URL：实例配置保持与 Java 版同一份，两边通用。"""
     if instance.dialect == "sqlite":
         # jdbc:sqlite:demo.db → demo.db（按第 3 个冒号切）；相对路径锚定项目目录
         path = Path(instance.url.split(":", 2)[2] or "demo.db")
         if not path.is_absolute():
             path = BASE_DIR / path
-        return f"sqlite:///{path.as_posix()}"
+        return f"sqlite+aiosqlite:///{path.as_posix()}"
 
     if instance.dialect == "mysql":
         # SQLAlchemy URL 不支持逗号多主机（loadbalance）；建引擎时随机选一台。
@@ -119,7 +117,7 @@ def _engine_url(instance: InstanceSettings) -> str:
         auth = ""
         if instance.username:
             auth = f"{quote_plus(instance.username)}:{quote_plus(instance.password)}@"
-        return f"mysql+pymysql://{auth}{host}:{port}/?charset=utf8mb4"
+        return f"mysql+aiomysql://{auth}{host}:{port}/?charset=utf8mb4"
         # charset 必须显式：默认 latin1，中文必乱码
 
     raise RuntimeError(f"方言 {instance.dialect!r} 暂未实现（当前支持 sqlite / mysql）")
