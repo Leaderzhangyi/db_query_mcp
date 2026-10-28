@@ -26,7 +26,7 @@ def validate(sql: str, dialect: str = "mysql") -> str:
     stmt = statements[0]
 
     # ③ 必须是 SELECT。每种语句一个 AST 类：Insert/Update/Delete/Drop/Truncate...
-    #    注意：Union 不是 Select 的子类（这是我移植 Java 版时踩过的真坑），要单独放行
+    #    注意：Union 不是 Select 的子类，要单独放行
     if not isinstance(stmt, (exp.Select, exp.Union, exp.Intersect, exp.Except)):
         raise ValueError(f"只允许 SELECT 查询，当前是 {type(stmt).__name__}")
 

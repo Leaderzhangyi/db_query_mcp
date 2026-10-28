@@ -1,0 +1,14 @@
+# 本地开发环境（默认）：SQLite 演示库，stdio 传输，零环境变量即可启动。
+# demo.db 由 make_demo_db.py 生成（2 万行 orders 表）。
+
+server:
+  transport: stdio
+
+results:
+  download_base_url: http://localhost:9001/results
+
+databases:
+  demo:
+    dialect: sqlite
+    path: demo.db          # 相对路径按项目目录解析
+    catalogs: [ demo ]     # sqlite 一个文件就是一个库

@@ -1,7 +1,9 @@
 """冒烟测试：不起真服务器，装配后走内存通道跑全流程。
 
-覆盖：配置加载与 profile 覆盖、占位符展开、启动期交叉校验、SQL 守卫、
-异步查询全流程（经 MCP 客户端调用）、任务表 LRU/TTL、结果文件回收。
+覆盖：配置加载与环境覆盖层、占位符展开、启动校验、SQL 守卫、
+资源（db://databases、db://{db}/tables）、提示词、
+异步查询全流程（经 MCP 客户端调用，结构化输出）、任务表 LRU/TTL、
+结果文件回收、连接池借出/归还/池满超时。
 运行：python smoke_test.py
 """
 import asyncio
@@ -14,71 +16,77 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-# 本地没有银行凭据：给占位值，让 prod 段的 ${MYSQL_USER} 等能展开（dev 用不到它们）
+# 本地没有银行凭据：给占位值，让 prod 覆盖层的 ${MYSQL_USER} 等能展开
 os.environ.setdefault("MYSQL_USER", "smoke")
 os.environ.setdefault("MYSQL_PASSWORD", "smoke")
 os.environ.setdefault("DOWNLOAD_BASE_URL", "http://localhost:9001/results")
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout,
-                    format="%(name)s %(message)s")
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(name)s %(message)s")
 
 from pydantic import ValidationError
+from sqlalchemy.exc import TimeoutError as SaPoolTimeout
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from executor import QueryExecutor, TaskStore
 from server import build
-from settings import DbSettings, Settings
+from settings import Settings
 from sql_guard import validate
 
-# ---------- ① 配置：dev 默认合并 sqlite-demo，download-base-url 来自 application-dev.yml ----------
+# ---------- ① 配置：dev 默认合并 sqlite 演示库，download_base_url 来自 config.dev.yaml ----------
 s = Settings()
-assert s.spring.profiles.active == "dev"
-assert s.spring.ai.mcp.server.protocol == "stdio"
-assert "sqlite-demo" in s.mcp.db.instances
-assert (s.mcp.db.result.download_base_url or "").endswith("/results")
-demo = s.mcp.db.instances["sqlite-demo"]
-assert demo.dialect == "sqlite" and "demo" in demo.catalogs
-print("① 配置加载 OK：profile=dev，download-base-url =", s.mcp.db.result.download_base_url)
+assert s.server.transport == "stdio"
+assert s.server.name == "db-query-server"
+assert "demo" in s.databases and s.databases["demo"].dialect == "sqlite"
+assert s.databases["demo"].catalogs == ["demo"]
+assert s.results.download_base_url.endswith("/results")
+print("① 配置加载 OK：transport=stdio，download_base_url =", s.results.download_base_url)
 
-# ---------- ② prod profile：真实 mysql 实例 + ${MYSQL_USER} 展开 ----------
-os.environ["SPRING_PROFILES_ACTIVE"] = "prod"
+# ---------- ② prod 覆盖层：真实 mysql 实例 + ${MYSQL_USER} 展开 ----------
+os.environ["MCP_ENV"] = "prod"
 try:
     s2 = Settings()
-    mysql = s2.mcp.db.instances["mysql"]
-    assert mysql.dialect == "mysql" and mysql.username == "smoke"
-    assert "sdls_des" in mysql.catalogs and "sdp_isl_des" in mysql.catalogs
-    assert mysql.maximum_pool_size == 8            # 兼容字段原样读进来
-    assert s2.spring.ai.mcp.server.protocol == "streamable"   # prod 未覆盖 → 用主配置
+    bank = s2.databases["bank"]
+    assert bank.dialect == "mysql" and bank.username == "smoke"
+    assert bank.hosts == ["10.69.43.11:9030", "10.69.43.12:9030", "10.69.43.13:9030"]
+    assert "sdls_des" in bank.catalogs and bank.pool_size == 8
+    assert s2.server.transport == "http"
+    from database import _engine_url
+    url = _engine_url(bank)
+    host = url.split("@")[1].split(":")[0]
+    assert url.startswith("mysql+aiomysql://smoke:smoke@") and host.startswith("10.69.43.")
+    assert "charset=utf8mb4" in url
 finally:
-    os.environ.pop("SPRING_PROFILES_ACTIVE")
-print("② prod 配置 OK：mysql 实例凭据占位符展开为", mysql.username)
+    os.environ.pop("MCP_ENV")
+print("② prod 配置 OK：mysql 主机组与凭据占位符展开，URL =", url)
 
-# ---------- ③ 启动期交叉校验 ----------
-def _db_cfg(async_ttl: int, result_ttl: int, base: str = "http://x") -> DbSettings:
-    return DbSettings(**{
-        "async": {"ttl-minutes": async_ttl},
-        "result": {"ttl-minutes": result_ttl, "download-base-url": base},
-        "instances": {"sqlite": {"url": "jdbc:sqlite:t.db"}},   # 键名=方言名，dialect 可省
-    })
+# ---------- ③ 启动期校验 ----------
+from settings import ResultsSettings, ServerSettings, QuerySettings, DatabaseSettings
 
-for name, kwargs, expect in [
-    ("result.ttl <= async.ttl 被拦", dict(async_ttl=50, result_ttl=40), "必须大于"),
-    ("download-base-url 缺失被拦", dict(async_ttl=30, result_ttl=40, base=""), "download-base-url 缺失"),
-    ("自定义实例名缺 dialect 被拦", None, "必须显式配置 dialect"),
+def _settings(**kw) -> Settings:
+    return Settings(
+        server=kw.get("server") or ServerSettings(),
+        query=kw.get("query") or QuerySettings(),
+        results=kw.get("results") or ResultsSettings(download_base_url="http://x"),
+        databases=kw.get("databases")
+        or {"demo": {"dialect": "sqlite", "path": "demo.db", "catalogs": ["demo"]}},
+    )
+
+for name, bad in [
+    ("results.ttl <= query.task_ttl 被拦",
+     dict(query={"task_ttl_minutes": 50},
+          results={"ttl_minutes": 40, "download_base_url": "http://x"})),
+    ("http 模式缺 download_base_url 被拦",
+     dict(server={"transport": "http"}, results={"download_base_url": ""})),
+    ("缺 dialect 被拦", dict(databases={"x": {"catalogs": ["a"]}})),
+    ("sqlite 缺 path 被拦", dict(databases={"x": {"dialect": "sqlite", "catalogs": ["a"]}})),
 ]:
     try:
-        if kwargs is None:
-            DbSettings(**{"result": {"download-base-url": "http://x"},
-                          "instances": {"pg-report": {"url": "jdbc:postgresql://h/db"}}})
-        else:
-            _db_cfg(**kwargs)
+        _settings(**bad)
         raise SystemExit(f"!! 未拦截：{name}")
     except ValidationError as e:
-        assert expect in str(e), str(e)
-        print(f"③ 交叉校验 OK：{name}")
-assert _db_cfg(async_ttl=30, result_ttl=40).instances["sqlite"].dialect == "sqlite"
-print("③ 键名即方言时 dialect 自动补全 OK")
+        print(f"③ 校验 OK：{name}")
 
-# ---------- ④ SQL 守卫（sqlite 方言） ----------
+# ---------- ④ SQL 守卫 ----------
 for bad in ["DELETE FROM orders", "UPDATE orders SET amount = 0",
             "SELECT * FROM orders FOR UPDATE", "SELECT SLEEP(5) FROM orders",
             "SELECT 1 FROM orders; SELECT 2"]:
@@ -88,7 +96,7 @@ for bad in ["DELETE FROM orders", "UPDATE orders SET amount = 0",
     except ValueError as e:
         print("④ 拦截 OK:", bad[:28].ljust(28), "->", str(e)[:32])
 
-# ---------- ⑤ 全流程：MCP 客户端内存调用 ----------
+# ---------- ⑤ 全流程：资源 + 提示词 + MCP 客户端调用 ----------
 async def flow() -> None:
     from fastmcp import Client
 
@@ -97,24 +105,39 @@ async def flow() -> None:
         tools = sorted(t.name for t in await client.list_tools())
         assert tools == ["get_query_db_async_result", "query_db_async"], tools
 
+        # 资源：可查的库 + 表清单（URI 模板）
+        dbs = await client.read_resource("db://databases")
+        assert "demo" in str(dbs), dbs
+        tables = await client.read_resource("db://demo/tables")
+        assert "orders" in str(tables), tables
+        print("⑤ 资源 OK：db://databases ->", str(dbs)[:40], "| db://demo/tables ->", str(tables)[:30])
+
+        # 提示词模板
+        prompts = {p.name for p in await client.list_prompts()}
+        assert "query-assistant" in prompts, prompts
+        rendered = await client.get_prompt("query-assistant",
+                                           {"question": "各状态订单数", "database": "demo"})
+        assert "各状态订单数" in str(rendered)
+        print("⑤ 提示词 OK：query-assistant 可用")
+
         r = await client.call_tool("query_db_async", {
             "sql": "SELECT status, COUNT(*) AS cnt, ROUND(SUM(amount), 2) AS total "
                    "FROM orders GROUP BY status",
             "database": "demo"})
-        assert r.data["success"], r.data
-        query_id = r.data["data"]
+        assert r.data.success, r.data            # 结构化输出：直接拿 ToolReply 字段
+        query_id = r.data.data
 
         for _ in range(100):
             r2 = await client.call_tool("get_query_db_async_result", {"query_id": query_id})
-            if "仍在执行" in r2.data["message"]:
+            if r2.data.message and "仍在执行" in r2.data.message:
                 await asyncio.sleep(0.05)
                 continue
             break
-        assert r2.data["success"], r2.data["message"]
-        print("⑤ 工具返回:", r2.data["message"], "->", r2.data["data"])
+        assert r2.data.success, r2.data.message
+        print("⑤ 工具返回:", r2.data.message, "->", r2.data.data)
 
-        filename = r2.data["data"].split("/")[-1]
-        content = (Path("results") / filename).read_text(encoding="utf-8")
+        filename = r2.data.data.split("/")[-1]
+        content = (Path(s.results.dir) / filename).read_text(encoding="utf-8")
         print("--- 结果文件 ---")
         print(content)
         assert "cnt" in content and "PAID" in content
@@ -122,10 +145,10 @@ async def flow() -> None:
         # 失败路径：未知库 / 危险 SQL
         r3 = await client.call_tool("query_db_async",
                                     {"sql": "SELECT 1", "database": "nope"})
-        assert not r3.data["success"] and "未知数据库" in r3.data["message"]
+        assert not r3.data.success and "未知数据库" in r3.data.message
         r4 = await client.call_tool("query_db_async",
                                     {"sql": "DELETE FROM orders", "database": "demo"})
-        assert not r4.data["success"]
+        assert not r4.data.success
         print("⑤ 失败路径 OK：未知库与危险 SQL 都被礼貌拒绝")
 
 asyncio.run(flow())
@@ -145,10 +168,10 @@ print("⑥ 任务表 OK：LRU 淘汰 + TTL 过期")
 # ---------- ⑦ 结果文件回收：TTL 删除 + 容量兜底 ----------
 with tempfile.TemporaryDirectory() as tmp:
     small = s.model_copy(deep=True)
-    small.mcp.db.async_.max_pool_size = 1
-    small.mcp.db.async_.queue_capacity = 2
-    small.mcp.db.result.ttl_minutes = 1                 # 60s TTL
-    small.mcp.db.result.max_total_bytes = 150           # 容量兜底：三个文件 50+50+70 才会超
+    small.query.workers = 1
+    small.query.queue_size = 2
+    small.results.ttl_minutes = 1                 # 60s TTL
+    small.results.max_total_bytes = 150           # 容量兜底：三个文件 50+50+70 才会超
     ex = QueryExecutor(small, results_dir=Path(tmp))
     try:
         def fake(name: str, text: str, age: float) -> Path:
@@ -172,10 +195,7 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         ex.close()
 
-# ---------- ⑧ 连接池（SQLAlchemy 异步 QueuePool）：借出/归还/池满超时 ----------
-from sqlalchemy.exc import TimeoutError as SaPoolTimeout
-from sqlalchemy.ext.asyncio import create_async_engine
-
+# ---------- ⑧ 连接池（SQLAlchemy 异步引擎）：借出/归还/池满超时 ----------
 async def pool_test() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         engine = create_async_engine(
@@ -194,6 +214,6 @@ async def pool_test() -> None:
         await engine.dispose()
 
 asyncio.run(pool_test())
-print("⑧ 连接池 OK：借出 / 归还 / 池满超时（SQLAlchemy 异步引擎 + aiosqlite）")
+print("⑧ 连接池 OK：借出 / 归还 / 池满超时")
 
 print("SMOKE PASS")

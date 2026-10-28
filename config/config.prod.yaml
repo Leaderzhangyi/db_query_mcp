@@ -1,0 +1,24 @@
+# 生产环境（银行内网）：真实 MySQL（3 台负载均衡），http 传输。
+# 启动：MCP_ENV=prod
+# 凭据走环境变量，缺失启动即失败（不给默认值）：
+#   MYSQL_USER / MYSQL_PASSWORD / DOWNLOAD_BASE_URL
+
+server:
+  transport: http
+  port: 9001
+
+results:
+  download_base_url: ${DOWNLOAD_BASE_URL}
+
+databases:
+  bank:
+    dialect: mysql
+    hosts:                 # 一组等价主机，新建连接时随机挑一台
+      - 10.69.43.11:9030
+      - 10.69.43.12:9030
+      - 10.69.43.13:9030
+    username: ${MYSQL_USER}
+    password: ${MYSQL_PASSWORD}
+    # 库名列表：模型查询时按库名路由到这里
+    catalogs: [ sdls_des, sdp_ial_des, sdp_icl_des, sdp_isl_des, srpts_des ]
+    pool_size: 8           # 覆盖全局 pool.size

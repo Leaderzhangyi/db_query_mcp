@@ -1,16 +1,16 @@
-"""数据处理层：异步任务表 + asyncio 任务池 + 结果文件落盘与回收。
+"""数据处理层：任务表 + asyncio 任务池 + 结果文件落盘与回收。
 
-全链路单事件循环（FastMCP 的 stdio/http 传输都在 asyncio 上），没有任何
+全链路单事件循环（stdio / http 两种传输都跑在 asyncio 上），没有任何
 线程和锁——任务表只在事件循环里被访问，天然串行：
-  max-pool-size   工作协程数 = 同时在跑的查询上限
-  queue-capacity  asyncio.Queue 上限；满了 submit 抛 QueueFull
-                  （调用方转成“稍后重试”），绝不让请求无限堆积
-  ttl-minutes     任务在内存里的保留时长，查一次状态刷新一次“最近访问”
-  max-tasks       任务表上限，超出按最久未访问淘汰（RUNNING 的不淘汰）
-  result.*        结果文件 TTL 与目录总容量兜底，由后台协程周期回收
+  query.workers        工作协程数 = 同时在跑的查询上限
+  query.queue-size     asyncio.Queue 上限；满了 submit 抛 QueueFull
+                       （调用方转成“稍后重试”），绝不让请求无限堆积
+  query.task-ttl-minutes 任务在内存里的保留时长，查一次状态刷新一次“最近访问”
+  query.max-tasks      任务表上限，超出按最久未访问淘汰（RUNNING 的不淘汰）
+  results.*            结果文件 TTL 与目录总容量兜底，由后台协程周期回收
 
 行数刻意不回传给模型（只进 QUERY_LOG 服务端日志）——该不该取明细应该在
-写 SQL 时决定，模型一旦知道行数就会纠结要不要拉全量（Java 版同理）。
+写 SQL 时决定，模型一旦知道行数就会纠结要不要拉全量。
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import database
-from settings import InstanceSettings, Settings
+from settings import BASE_DIR, DatabaseSettings, Settings
 
 QUERY_LOG = logging.getLogger("QUERY_LOG")
 JANITOR_INTERVAL_SECONDS = 60
@@ -88,14 +88,15 @@ class QueryExecutor:
 
     def __init__(self, settings: Settings, results_dir: Path | None = None):
         self._settings = settings
-        self._db_cfg = settings.mcp.db
-        self._results_dir = results_dir or (Path(__file__).parent / "results")
+        self._query_cfg = settings.query
+        self._results_cfg = settings.results
+        self._results_dir = results_dir or (BASE_DIR / settings.results.dir)
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._store = TaskStore(
-            max_tasks=self._db_cfg.async_.max_tasks,
-            ttl_seconds=self._db_cfg.async_.ttl_minutes * 60,
+            max_tasks=self._query_cfg.max_tasks,
+            ttl_seconds=self._query_cfg.task_ttl_minutes * 60,
         )
-        self._jobs: asyncio.Queue = asyncio.Queue(maxsize=self._db_cfg.async_.queue_capacity)
+        self._jobs: asyncio.Queue = asyncio.Queue(maxsize=self._query_cfg.queue_size)
         self._workers: list[asyncio.Task] = []
         self._stopped = False
 
@@ -103,14 +104,14 @@ class QueryExecutor:
     def results_dir(self) -> Path:
         return self._results_dir
 
-    async def submit(self, sql: str, instance_name: str,
-                     instance: InstanceSettings, catalog: str | None) -> str:
+    async def submit(self, sql: str, db_name: str,
+                     db: DatabaseSettings, catalog: str | None) -> str:
         """注册任务并排队，返回 queryId。队列满抛 asyncio.QueueFull。"""
         self._ensure_workers()
         query_id = str(uuid.uuid4())
         self._store.add_running(query_id)
         try:
-            self._jobs.put_nowait((query_id, sql, instance_name, instance, catalog))
+            self._jobs.put_nowait((query_id, sql, db_name, db, catalog))
         except asyncio.QueueFull:
             self._store.drop(query_id)   # 没排上队，任务快照也得撤掉
             raise
@@ -130,7 +131,7 @@ class QueryExecutor:
             return
         self._workers = [
             asyncio.create_task(self._worker(), name=f"query-worker-{i}")
-            for i in range(self._db_cfg.async_.max_pool_size)
+            for i in range(self._query_cfg.workers)
         ]
         asyncio.create_task(self._janitor_loop(), name="result-janitor")
 
@@ -146,13 +147,13 @@ class QueryExecutor:
             finally:
                 self._jobs.task_done()
 
-    async def _run_one(self, query_id: str, sql: str, instance_name: str,
-                       instance: InstanceSettings, catalog: str | None) -> None:
+    async def _run_one(self, query_id: str, sql: str, db_name: str,
+                       db: DatabaseSettings, catalog: str | None) -> None:
         result_file = self._results_dir / f"{query_id}.csv"
         started = time.time()
         try:
             # with 退出即归还连接：正常跑完归还复用；中途抛异常则作废，绝不带病回池
-            async with database.borrow(self._settings, instance_name, instance, catalog) as conn:
+            async with database.borrow(self._settings, db_name, db, catalog) as conn:
                 with open(result_file, "w", encoding="utf-8", newline="") as f:
                     writer = csv.writer(f)
 
@@ -171,13 +172,13 @@ class QueryExecutor:
                     rows = await conn.run_sync(write_all)
             elapsed_ms = int((time.time() - started) * 1000)
             QUERY_LOG.info("%s %s.%s 行数=%d 耗时=%dms",
-                           query_id, instance_name, catalog, rows, elapsed_ms)
+                           query_id, db_name, catalog, rows, elapsed_ms)
             self._store.finish(query_id, status="SUCCESS",
                                file=result_file.name, rows=rows, elapsed_ms=elapsed_ms)
         except BaseException as e:          # 任何漏网异常都不能让任务永远停在 RUNNING
             result_file.unlink(missing_ok=True)   # 半截文件不留尸
             reason = str(e).splitlines()[0]
-            QUERY_LOG.warning("%s %s.%s 失败 原因=%s", query_id, instance_name, catalog, reason)
+            QUERY_LOG.warning("%s %s.%s 失败 原因=%s", query_id, db_name, catalog, reason)
             self._store.finish(query_id, status="FAILED", error=reason)
 
     async def _janitor_loop(self) -> None:
@@ -189,7 +190,7 @@ class QueryExecutor:
         """一轮回收：①过期任务 ②过期结果文件 ③目录超容量删最旧。测试直接调这里。"""
         self._store.purge_expired()
         now = time.time()
-        ttl = self._db_cfg.result.ttl_minutes * 60
+        ttl = self._results_cfg.ttl_minutes * 60
         kept: list[tuple[Path, float, int]] = []
         for path in self._results_dir.glob("*.csv"):
             stat = path.stat()
@@ -200,7 +201,7 @@ class QueryExecutor:
         # 容量兜底：正常靠 TTL 回收，这里只兜“TTL 窗口内堆积出海量查询”
         total = sum(size for _, _, size in kept)
         for path, _, size in sorted(kept, key=lambda item: item[1]):   # 最旧的先删
-            if total <= self._db_cfg.result.max_total_bytes:
+            if total <= self._results_cfg.max_total_bytes:
                 break
             path.unlink(missing_ok=True)
             total -= size
