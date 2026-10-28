@@ -92,7 +92,8 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
     @mcp.resource(
         "db://databases",
         name="可查询的数据库",
-        description="全部数据源及其库名（catalogs）。query_db_async 的 database 参数只能从中选。",
+        description="全部数据环境（数据源）及其库名（catalogs）。"
+                    "query_db_async 的 database 参数填环境名或库名。",
     )
     def databases_resource() -> dict[str, list[str]]:
         return {name: db.catalogs for name, db in settings.databases.items()}
@@ -154,7 +155,8 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
     @mcp.tool
     async def query_db_async(sql: str, database: str = "", *, ctx: Context) -> ToolReply:
         """异步执行只读 SQL，立即返回查询ID。
-        database 填 db://databases 资源里的库名，留空用默认库。
+        database 填 db://databases 资源里的环境名（如 dstg2）或具体库名，
+        留空用默认环境。
         结果策略：小结果（约 5 行以内）会在 get_query_db_async_result 里直接展示；
         更大的落成 CSV 文件给下载链接。
         用法：① 拿到 queryId；② 调 get_query_db_async_result 查状态。"""

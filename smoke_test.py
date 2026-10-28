@@ -43,17 +43,18 @@ assert s.results.download_base_url.endswith("/results")
 print("① 配置加载 OK：transport=%s，download_base_url = %s"
       % (s.server.transport, s.results.download_base_url))
 
-# ---------- ② prod 覆盖层：真实 mysql 实例 + ${MYSQL_USER} 展开 ----------
-# 只断言不变量（占位符展开、URL 结构、主机来自配置），不锁死具体 IP/库名，
+# ---------- ② prod 覆盖层：环境化数据源 + ${MYSQL_USER} 展开 ----------
+# 只断言不变量（占位符展开、URL 结构、主机来自配置），不锁死环境名/IP/库名，
 # 改 config.prod.yaml 不需要改这里
 os.environ["MCP_ENV"] = "prod"
 try:
     s2 = Settings()
-    bank = s2.databases["bank"]
-    assert bank.dialect == "mysql" and bank.username == "smoke"   # ${MYSQL_USER} 展开
+    sources = [db for db in s2.databases.values() if db.dialect == "mysql"]
+    assert sources, "prod 至少要有一条 mysql 数据源（=一个数据环境）"
+    bank = sources[0]
+    assert bank.username == "smoke"                               # ${MYSQL_USER} 展开
     assert bank.hosts and all(h.count(":") == 1 for h in bank.hosts)
     assert bank.catalogs
-    assert bank.pool_size == 8
     assert s2.server.transport == "http"
     from database import _engine_url
     url = _engine_url(bank)
@@ -85,12 +86,42 @@ for name, bad in [
      dict(server={"transport": "http"}, results={"download_base_url": ""})),
     ("缺 dialect 被拦", dict(databases={"x": {"catalogs": ["a"]}})),
     ("sqlite 缺 path 被拦", dict(databases={"x": {"dialect": "sqlite", "catalogs": ["a"]}})),
+    ("库名跨环境重名被拦",
+     dict(databases={"a": {"dialect": "sqlite", "path": "x.db", "catalogs": ["t1"]},
+                     "b": {"dialect": "sqlite", "path": "y.db", "catalogs": ["T1"]}})),
 ]:
     try:
         _settings(**bad)
         raise SystemExit(f"!! 未拦截：{name}")
     except ValidationError as e:
         print(f"③ 校验 OK：{name}")
+
+# ---------- ③+ 库路由：环境名 / 库名 / 留空 三种入口 ----------
+# MCP_ENV 指到不存在的覆盖层：config.yaml 的 databases 是空 dict，
+# 这样 init 传的测试数据源不会被 yaml 深合并混进 demo
+from database import route as _route
+
+os.environ["MCP_ENV"] = "test"
+try:
+    _r = _settings(databases={
+        "stg1": {"dialect": "sqlite", "path": "x.db", "catalogs": ["sdp_ial_stg1"]},
+        "dstg2": {"dialect": "sqlite", "path": "y.db",
+                  "catalogs": ["rcvp_dstg2", "dp_ial_dstg2"]},
+    })
+    assert list(_r.databases) == ["stg1", "dstg2"]
+    assert _route(_r, "")[2] == "sdp_ial_stg1"            # 留空 → 第一个环境的第一个库
+    assert _route(_r, "dstg2")[:1] == ("dstg2",)          # 环境名 → 该环境第一个库
+    assert _route(_r, "DSTG2")[2] == "rcvp_dstg2"         # 环境名忽略大小写
+    name, _db, cat = _route(_r, "dp_ial_dstg2")           # 库名 → 跨环境精确路由
+    assert (name, cat) == ("dstg2", "dp_ial_dstg2")
+    try:
+        _route(_r, "nope")
+        raise SystemExit("!! 路由未拦截未知名")
+    except ValueError as e:
+        assert "未知数据库" in str(e) and "stg1" in str(e) and "dstg2" in str(e)
+finally:
+    os.environ.pop("MCP_ENV")
+print("③+ 路由 OK：留空/环境名/库名三种入口都通，未知名报错带环境清单")
 
 # ---------- ④ SQL 守卫 ----------
 for bad in ["DELETE FROM orders", "UPDATE orders SET amount = 0",
@@ -235,9 +266,12 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # ---------- ⑧ 连接池（SQLAlchemy 异步引擎）：借出/归还/池满超时 ----------
 async def pool_test() -> None:
+    from sqlalchemy.pool import AsyncAdaptedQueuePool   # sqlite 新版默认 NullPool，显式指定才能测池上限
+
     with tempfile.TemporaryDirectory() as tmp:
         engine = create_async_engine(
             f"sqlite+aiosqlite:///{Path(tmp).as_posix()}/pool.db",
+            poolclass=AsyncAdaptedQueuePool,
             pool_size=1, max_overflow=0, pool_timeout=0.3, pool_pre_ping=True,
         )
         held = await engine.connect()        # 占满池上限（1）

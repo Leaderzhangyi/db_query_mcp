@@ -117,8 +117,9 @@ class ResultsSettings(BaseModel):
 class DatabaseSettings(BaseModel):
     """databases 段里的一个数据源：一套连接，下挂多个库（catalogs）。
 
-    一个数据源 = 一个连接池；「库」不在连接上写死，查询时按 catalog 路由
-    （mysql 用 USE 切库，sqlite 一个文件就是一个库）。
+    常用布局：一个数据环境（stg1 / stg2 / dstg2 …）= 一条数据源，数据源名
+    就用环境名——每个环境各一个连接池；「库」不在连接上写死，查询时按
+    catalog 路由（mysql 用 USE 切库，sqlite 一个文件就是一个库）。
 
     sqlite 只需要 path；mysql 需要 hosts + 账号。缺什么由启动校验兜底。
     """
@@ -220,6 +221,20 @@ class Settings(BaseSettings):
                 _, _, port = host.partition(":")
                 if not port.isdigit():
                     raise ValueError(f"databases.{name}.hosts 里 {host!r} 端口不是数字")
+
+        # —— 库名跨数据源唯一 ——
+        # route() 按库名找数据源：两个环境配了同名库，查询会永远命中先配置的
+        # 那个——「静默走错环境」比启动失败难排查得多，所以在启动期拦下。
+        # 行里通常靠环境后缀区分（rcvp_stg1 / rcvp_dstg2），天然满足。
+        owner: dict[str, str] = {}
+        for name, db in self.databases.items():
+            for catalog in db.catalogs:
+                key = catalog.lower()
+                if key in owner:
+                    raise ValueError(
+                        f"库名 {catalog!r} 同时出现在 {owner[key]} 和 {name} 两个数据源："
+                        "按库名路由会认错数据环境，请改名区分（如带环境后缀）")
+                owner[key] = name
 
         # —— 结果文件要比任务记录活得久 ——
         # 任务 TTL 30 分钟、文件 TTL 40 分钟：模型 29 分钟时还能查到「成功」，

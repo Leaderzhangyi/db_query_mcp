@@ -32,10 +32,11 @@ _SAFE_IDENT = re.compile(r"^[0-9A-Za-z_]+$")
 
 
 def route(settings: Settings, database: str) -> tuple[str, DatabaseSettings, str | None]:
-    """库路由：database 是配置里某个数据源的 catalog 名（忽略大小写）。
+    """库路由：database 可以是数据源名（=数据环境，如 stg1）或库（catalog）名。
 
-    留空 → 第一个数据源的第一个库（默认库）。
-    找不到 → 报错并列出全部可选库，让模型自己改。
+    传环境名 → 落到该环境的第一个库；传库名 → 精确路由到库（均忽略大小写）。
+    留空 → 第一个数据源的第一个库（默认环境）。
+    找不到 → 报错并列出「环境(库、库…)」清单，让模型自己改。
     返回的 catalog 保持配置里的原始大小写（USE 语句要用）。
     """
     databases = settings.databases
@@ -47,12 +48,18 @@ def route(settings: Settings, database: str) -> tuple[str, DatabaseSettings, str
         return name, db, (db.catalogs[0] if db.catalogs else None)
 
     wanted = database.strip().lower()
+    # 先按数据源名（=环境）匹配：整个环境直接可用
+    for name, db in databases.items():
+        if name.lower() == wanted:
+            return name, db, (db.catalogs[0] if db.catalogs else None)
+    # 再按库名匹配：跨环境精确路由（库名跨数据源唯一，由启动校验保证）
     for name, db in databases.items():
         for catalog in db.catalogs:
             if catalog.lower() == wanted:
                 return name, db, catalog
-    choices = ", ".join(sorted(c for d in databases.values() for c in d.catalogs)) or "（无）"
-    raise ValueError(f"未知数据库 {database!r}，可用的库：{choices}")
+    choices = (", ".join(f"{n}({'、'.join(d.catalogs)})" for n, d in databases.items())
+               or "（无）")
+    raise ValueError(f"未知数据库 {database!r}，可用的数据环境与库：{choices}")
 
 
 @asynccontextmanager
@@ -91,16 +98,23 @@ def _get_engine(settings: Settings, db_name: str, db: DatabaseSettings) -> Async
         engine = _engines.get(db_name)
         if engine is None:
             pool_cfg = settings.pool
+            # sqlite 文件库在较新 SQLAlchemy 里默认 NullPool（连接不复用），
+            # 不接受池容量参数——池容量三件套只给 mysql（QueuePool）；
+            # recycle / pre_ping 两种池都认
+            pool_kwargs: dict = {"pool_recycle": pool_cfg.max_lifetime_s,
+                                 "pool_pre_ping": pool_cfg.pre_ping}
+            if db.dialect == "mysql":
+                pool_kwargs.update(
+                    pool_size=db.pool_size or pool_cfg.size,
+                    max_overflow=0,                            # 固定池：上限即 pool_size
+                    pool_timeout=pool_cfg.connect_timeout_ms / 1000,
+                )
             try:
                 engine = create_async_engine(
                     _engine_url(db),
-                    pool_size=db.pool_size or pool_cfg.size,
-                    max_overflow=0,                                # 固定池：上限即 pool_size
-                    pool_timeout=pool_cfg.connect_timeout_ms / 1000,
-                    pool_recycle=pool_cfg.max_lifetime_s,
-                    pool_pre_ping=pool_cfg.pre_ping,
                     connect_args=({"connect_timeout": pool_cfg.connect_timeout_ms // 1000}
                                   if db.dialect == "mysql" else {}),
+                    **pool_kwargs,
                 )
             except ModuleNotFoundError as e:
                 raise RuntimeError(

@@ -1,5 +1,10 @@
-# 生产环境（银行内网）：真实 MySQL（3 台负载均衡），http 传输。
-# 启动：MCP_ENV=prod
+# 生产环境（银行内网）：真实 MySQL，http 传输。启动：MCP_ENV=prod
+# 数据环境布局：一个全量环境（stg1 / stg2 / dstg2 …）= 一条数据源，
+# 数据源名即环境名，catalogs 填该环境里可查的库。
+# 库名必须在所有环境间唯一（启动校验），行里一般靠环境后缀区分
+# （rcvp_stg1 / rcvp_stg2 / rcvp_dstg2）。
+# 模型查询时 database 参数既可填环境名（如 dstg2，落到该环境第一个库），
+# 也可填具体库名（如 rcvp_dstg2，精确路由）。
 # 凭据走环境变量，缺失启动即失败（不给默认值）：
 #   MYSQL_USER / MYSQL_PASSWORD / DOWNLOAD_BASE_URL
 
@@ -11,13 +16,28 @@ results:
   download_base_url: ${DOWNLOAD_BASE_URL}
 
 databases:
-  bank:
+  # 当前在用的环境：dstg2（第一个数据源 = 默认环境，database 留空时用它）
+  dstg2:
     dialect: mysql
     hosts:                 # 一组等价主机，新建连接时随机挑一台
       - 10.69.43.11:9030
     username: ${MYSQL_USER}
     password: ${MYSQL_PASSWORD}
-    # 库名列表：模型查询时按库名路由到这里
-    # catalogs: [ sdls_des, sdp_ial_des, sdp_icl_des, sdp_isl_des, srpts_des ]
-    catalogs: [rcvp_dstg2,dp_ial_dstg2]
-    pool_size: 8           # 覆盖全局 pool.size
+    catalogs: [rcvp_dstg2, dp_ial_dstg2]
+    pool_size: 8           # 覆盖全局 pool.size（每个环境各一个池）
+
+  # 其余环境照模板补一条即可：换主机 IP、填该环境的实际库名
+  # stg1:
+  #   dialect: mysql
+  #   hosts: [ 10.69.43.12:9030 ]
+  #   username: ${MYSQL_USER}
+  #   password: ${MYSQL_PASSWORD}
+  #   catalogs: [ sdls_stg1, sdp_ial_stg1, sdp_icl_stg1, sdp_isl_stg1, srpts_stg1 ]
+  #   pool_size: 8
+  # stg2:
+  #   dialect: mysql
+  #   hosts: [ 10.69.43.13:9030 ]
+  #   username: ${MYSQL_USER}
+  #   password: ${MYSQL_PASSWORD}
+  #   catalogs: [ sdls_stg2, sdp_ial_stg2, sdp_icl_stg2, sdp_isl_stg2, srpts_stg2 ]
+  #   pool_size: 8
