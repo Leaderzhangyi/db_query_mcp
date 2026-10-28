@@ -28,7 +28,7 @@ from sqlalchemy.exc import TimeoutError as SaPoolTimeout
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from executor import QueryExecutor, TaskStore
-from server import build
+from server import QUERY_LOG, build
 from settings import Settings
 from sql_guard import validate
 
@@ -215,5 +215,41 @@ async def pool_test() -> None:
 
 asyncio.run(pool_test())
 print("⑧ 连接池 OK：借出 / 归还 / 池满超时")
+
+# ---------- ⑨ http 下载端点：命中/未命中/非法 + 调用日志 ----------
+import httpx
+
+class _LogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+async def download_route_test() -> None:
+    s_http = s.model_copy(deep=True)
+    s_http.server.transport = "http"
+    capture = _LogCapture()
+    QUERY_LOG.addHandler(capture)
+    try:
+        app = build(s_http).http_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/results/evil.csv")
+            assert r.status_code == 400 and "非法文件名" in r.text
+            r = await client.get("/results/00000000-0000-0000-0000-000000000009.csv")
+            assert r.status_code == 404 and "不存在或已过期" in r.text
+            real = next(p.name for p in sorted(Path(s.results.dir).glob("*.csv"),
+                                               key=lambda p: p.stat().st_mtime) if p.stat().st_size > 0)
+            r = await client.get(f"/results/{real}")
+            assert r.status_code == 200 and "PAID" in r.text
+        joined = "\n".join(capture.messages)
+        assert "下载拒绝" in joined and "下载未命中" in joined and "下载 来源=" in joined
+    finally:
+        QUERY_LOG.removeHandler(capture)
+
+asyncio.run(download_route_test())
+print("⑨ 下载端点 OK：命中 200 / 未命中 404 / 非法 400，且每次下载都有调用日志")
 
 print("SMOKE PASS")

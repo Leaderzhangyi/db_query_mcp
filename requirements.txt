@@ -4,5 +4,6 @@ PyYAML>=6.0
 sqlglot>=25.0
 SQLAlchemy[asyncio]>=2.0
 aiosqlite>=0.20
-# MySQL 实例（prod profile）才需要；本地 sqlite 演示可不装
+httpx>=0.27             # 冒烟测试里离线测下载路由用
+# MySQL 数据源（prod）才需要；本地 sqlite 演示可不装
 # aiomysql>=0.2

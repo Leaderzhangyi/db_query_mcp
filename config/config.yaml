@@ -6,7 +6,7 @@
 
 server:
   name: db-query-server
-  transport: stdio        # stdio（本地被客户端拉起）| http（独立部署，监听 host:port）
+  transport: http        # stdio（本地被客户端拉起）| http（独立部署，监听 host:port）
   host: 0.0.0.0
   port: 9001
 

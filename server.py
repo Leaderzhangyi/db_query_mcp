@@ -147,15 +147,21 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         return ToolReply(success=True, data=file_or_url, message="查询完成，结果文件已生成。")
 
     # ------------------------- http 模式：结果文件下载端点 -------------------------
+    # 注意：FastMCP 的 LoggingMiddleware 只覆盖 MCP 协议调用（工具/资源/提示词），
+    # 自定义 HTTP 路由不经过它，下载日志在这里自己记。
     if is_http:
         @mcp.custom_route("/results/{filename}", methods=["GET"])
         async def download_result(request):
             filename = request.path_params["filename"]
+            client = request.client.host if request.client else "?"
             if not SAFE_FILENAME.fullmatch(filename):
+                QUERY_LOG.warning("下载拒绝 来源=%s 文件名=%r 原因=非法文件名", client, filename)
                 return PlainTextResponse("非法文件名", status_code=400)
             path = executor.results_dir / filename
             if not path.is_file():
+                QUERY_LOG.warning("下载未命中 来源=%s 文件=%s 原因=不存在或已过期", client, filename)
                 return PlainTextResponse("结果文件不存在或已过期", status_code=404)
+            QUERY_LOG.info("下载 来源=%s 文件=%s 大小=%dB", client, filename, path.stat().st_size)
             return FileResponse(path, media_type="text/csv")
 
     return mcp
@@ -170,9 +176,27 @@ def _setup_logging(settings: Settings) -> None:
     )
 
 
+def _log_startup(settings: Settings) -> None:
+    """启动日志：一眼确认配置是否按预期生效（传输 / 端口 / 数据源 / 池参数）。"""
+    sources = ", ".join(
+        f"{name}[{db.dialect}]({'/'.join(db.catalogs)})"
+        for name, db in settings.databases.items())
+    if settings.server.transport == "http":
+        QUERY_LOG.info(
+            "启动 %s：http://%s:%d 下载根=%s 连接池上限=%s 数据源：%s",
+            settings.server.name, settings.server.host, settings.server.port,
+            settings.results.download_base_url,
+            "/".join(str(db.pool_size or settings.pool.size)
+                     for db in settings.databases.values()),
+            sources)
+    else:
+        QUERY_LOG.info("启动 %s：stdio 数据源：%s", settings.server.name, sources)
+
+
 def main() -> None:
     settings = Settings()   # 加载失败（缺环境变量/校验不过）在这里就崩，越早越好
     _setup_logging(settings)
+    _log_startup(settings)
     mcp = build(settings)
     if settings.server.transport == "http":
         mcp.run(transport="http", host=settings.server.host, port=settings.server.port)
