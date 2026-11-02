@@ -140,7 +140,8 @@ async def flow() -> None:
     mcp = build(s)
     async with Client(mcp) as client:
         tools = sorted(t.name for t in await client.list_tools())
-        assert tools == ["get_query_db_async_result", "query_db_async"], tools
+        assert tools == ["browse_terms", "get_query_db_async_result",
+                         "query_db_async", "resolve_term"], tools
 
         # 资源：可查的库 + 表清单（URI 模板）
         dbs = await client.read_resource("db://databases")
@@ -158,6 +159,7 @@ async def flow() -> None:
         r_demo = str(await client.get_prompt("query-assistant",
                                              {"question": "各状态订单数", "database": "demo"}))
         assert "orders" in r_demo and "各状态订单数" in r_demo
+        assert "已登记的业务概念" in r_demo and "已支付金额" in r_demo   # 两段式：概念→口径→SQL
         r_bad = str(await client.get_prompt("query-assistant",
                                             {"question": "x", "database": "nope"}))
         assert "未知数据库" in r_bad and "demo" in r_bad
@@ -342,5 +344,38 @@ with tempfile.TemporaryDirectory() as tmp:
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(name)s %(message)s")   # 恢复冒烟自己的输出
 print("⑩ 文件日志 OK：目录自动创建，正常日志→app.log，告警→error.log")
+
+# ---------- ⑪ 语义层：概念检索 + 口径解析 + 概念资源 ----------
+async def ontology_flow() -> None:
+    from fastmcp import Client
+
+    mcp = build(s)
+    async with Client(mcp) as client:
+        # browse：名字命中 / 别名命中 / 无命中给清单
+        r = await client.call_tool("browse_terms", {"query": "已支付金额是多少"})
+        assert r.data.success and any(t.name == "已支付金额" for t in r.data.terms), r.data
+        r = await client.call_tool("browse_terms", {"query": "统计一下下单量"})
+        assert any(t.name == "订单量" for t in r.data.terms), r.data
+        r = await client.call_tool("browse_terms", {"query": "完全无关的词"})
+        assert r.data.success and not r.data.terms and "已登记" in r.data.message
+
+        # resolve：别名精确解析 → 完整口径（表/字段/聚合/过滤/粒度/关联）
+        r = await client.call_tool("resolve_term", {"term": "实付金额"})
+        assert r.data.success and r.data.id == "term_paid_amount", r.data
+        m = r.data.mappings[0]
+        assert m.table == "orders" and m.column == "amount"
+        assert "SUM" in m.aggregation and "PAID" in m.filter and m.grain
+        assert r.data.relations and r.data.relations[0].other   # 关联概念用登记名
+        r = await client.call_tool("resolve_term", {"term": "不存在的概念"})
+        assert not r.data.success and "已登记" in r.data.message
+
+        # 资源：概念清单（资源文本是 JSON 数组，中文被转义，解析后再断言）
+        import json as _json
+        names = _json.loads((await client.read_resource("db://terms"))[0].text)
+        assert any("已支付金额" in item for item in names), names
+        assert any("订单量" in item for item in names), names
+        print("⑪ 语义层 OK：browse 名字/别名检索、resolve 口径解析、db://terms 资源")
+
+asyncio.run(ontology_flow())
 
 print("SMOKE PASS")

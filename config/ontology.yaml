@@ -1,0 +1,57 @@
+# 语义层：业务概念 → 表/字段映射 + 指标口径 + 概念关联。
+# 由工具 browse_terms（按自然语言找概念）/ resolve_term（拿完整口径）暴露给 Agent；
+# 提示词 query-assistant 也会附上概念清单，引导 Agent 先查口径再写 SQL。
+# 数据模型参考 EvoOntology（github.com/ruc-datalab/EvoOntology）的 Term/Mapping/Relation。
+#
+# 维护口径：
+#   - aliases 收全业务里的各种说法（口径检索主要靠它）
+#   - filter 写业务过滤条件原文（Agent 会照着拼进 SQL 的 WHERE）
+#   - database 与 query_db_async 的 database 参数同口径：环境名或库名
+version: demo-v1
+
+terms:
+  - id: term_order_count
+    name: 订单量
+    aliases: [订单总数, 下单量]
+    definition: 全部订单条数，含未支付（PENDING）
+    mappings:
+      - database: demo
+        table: orders
+        column: id
+        aggregation: COUNT(*)
+        filter: ""
+        grain: 一单一行
+
+  - id: term_paid_amount
+    name: 已支付金额
+    aliases: [实付金额, 支付总额]
+    definition: status='PAID' 的订单金额合计（不含 PENDING）
+    mappings:
+      - database: demo
+        table: orders
+        column: amount
+        aggregation: SUM(amount)
+        filter: "status = 'PAID'"
+        grain: 一单一行
+
+  - id: term_customer_count
+    name: 客户数
+    aliases: [购买客户数, 去重客户数]
+    definition: 下过单的去重客户数
+    mappings:
+      - database: demo
+        table: orders
+        column: customer
+        aggregation: COUNT(DISTINCT customer)
+        filter: ""
+        grain: 一单一行
+
+relations:
+  - source: term_order_count
+    target: term_paid_amount
+    type: same_table
+    condition: 同在 orders 表，可合并为一条 GROUP BY 查询
+  - source: term_customer_count
+    target: term_order_count
+    type: same_table
+    condition: 同在 orders 表，customer 字段即客户维度

@@ -14,6 +14,7 @@ FastMCP 特性的落点：
   database.py   数据访问（库路由 + 异步连接池 + 表清单）
   executor.py   数据处理（任务表 / asyncio 任务池 / CSV 流式落盘 / 回收）
   sql_guard.py  SQL 守卫（只放行单条只读 SELECT）
+  ontology.py   语义层（业务概念→表字段口径，config/ontology.yaml）
   server.py     本文件：装配 + 入口
 
 运行：python server.py            （默认 dev：stdio）
@@ -37,6 +38,14 @@ from starlette.responses import FileResponse, PlainTextResponse
 
 from database import list_tables, route as route_database
 from executor import QueryExecutor
+from ontology import (
+    BrowseReply,
+    MappingCard,
+    OntologyStore,
+    ResolveReply,
+    TermCard,
+    load_ontology,
+)
 from settings import BASE_DIR, Settings
 from sql_guard import validate
 
@@ -72,6 +81,7 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
     """装配出完整的 FastMCP 实例（冒烟测试也走这里）。"""
     settings = settings or Settings()
     executor = executor or QueryExecutor(settings)
+    ontology = load_ontology(settings)   # 文件缺失=空语义层；内容不合法在这里就崩
     is_http = settings.server.transport == "http"
     download_base = settings.results.download_base_url.rstrip("/")
 
@@ -84,6 +94,9 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
             "结果策略：小结果（约 5 行以内）直接在回复里展示；更大的落成 CSV 文件"
             "给下载链接。重要：能用 COUNT / SUM / GROUP BY 在 SQL 里算完的，"
             "就不要取全量明细。"
+            "涉及业务指标（金额、数量、比率类）：先读资源 db://terms 看概念清单，"
+            "调 browse_terms 找概念、resolve_term 拿口径（聚合方式/过滤条件/粒度），"
+            "再按口径写 SQL——口径对了 SQL 才对。"
         ),
     )
     mcp.add_middleware(LoggingMiddleware(logger=QUERY_LOG))   # 每次调用自动一行日志
@@ -107,12 +120,29 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         db_name, db, catalog = route_database(settings, database)
         return await list_tables(settings, db_name, db, catalog)
 
+    @mcp.resource(
+        "db://terms",
+        name="业务概念清单",
+        description="语义层登记的业务概念及其别名。写 SQL 前先 browse_terms/resolve_term 查口径。",
+    )
+    def terms_resource() -> list[str]:
+        if not ontology:
+            return ["（语义层未配置：缺 config/ontology.yaml，请直接按表名写 SQL）"]
+        return [f"{t.name}（别名：{'、'.join(t.aliases) if t.aliases else '无'}）"
+                for t in ontology.all_terms()]
+
     # ------------------------- 提示词模板 -------------------------
     def _catalog_menu() -> str:
         """当前数据源与库清单（渲染进提示词，让用户直接挑）。"""
         return "\n".join(
             f"- {name}（{db.dialect}）：{'、'.join(db.catalogs)}"
             for name, db in settings.databases.items())
+
+    def _term_menu() -> str:
+        """语义层概念清单（两段式提示词的第一段：先对齐概念再写 SQL）。"""
+        if not ontology:
+            return "（未配置语义层，请按表名直接分析）"
+        return "、".join(ontology.term_names)
 
     @mcp.prompt(
         "query-assistant",
@@ -129,6 +159,7 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
             return (
                 f"用户的问题：{question}\n\n"
                 f"当前可用的库：\n{_catalog_menu()}\n\n"
+                f"已登记的业务概念：{_term_menu()}\n\n"
                 "用户还没选库。请先把上面的库清单展示给用户让其选择，"
                 "确认库名后再把问题转成查询。"
             )
@@ -146,9 +177,12 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         return (
             f"用户的问题：{question}\n\n"
             f"目标库：{database}，该库的表：{'、'.join(tables)}\n\n"
-            "请据此把问题转成一条只读 SELECT，调用 query_db_async 提交"
-            "（database 参数填上面的库名），再用 get_query_db_async_result 取结果。"
-            "要求：只允许单条 SELECT；能聚合就不取明细。"
+            f"已登记的业务概念：{_term_menu()}\n\n"
+            "两步走：① 问题若涉及上面的业务概念，先调 resolve_term 拿口径"
+            "（表、字段、聚合方式、过滤条件、粒度）；② 按口径把问题转成一条只读"
+            " SELECT，调用 query_db_async 提交（database 参数填上面的库名），"
+            "再用 get_query_db_async_result 取结果。"
+            "要求：只允许单条 SELECT；能聚合就不取明细；口径里的 filter 必须体现进 WHERE。"
         )
 
     # ------------------------- 工具 -------------------------
@@ -200,6 +234,43 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         # 模型不知道行数就不会纠结要不要拉全量明细（该在写 SQL 时决定）
         file_or_url = f"{download_base}/{task['file']}" if is_http else task["file"]
         return ToolReply(success=True, data=file_or_url, message="查询完成，结果已保存为 CSV 文件。")
+
+    # ------------------------- 工具：语义层（口径查询） -------------------------
+    @mcp.tool
+    async def browse_terms(query: str) -> BrowseReply:
+        """按自然语言找业务概念（如"已支付金额""下单量""客户数"）。
+        返回匹配概念的 id/名字/定义；选定后调 resolve_term 拿完整口径再写 SQL。
+        语义层未配置时 terms 为空、message 说明原因。"""
+        if not ontology:
+            return BrowseReply(
+                success=True, terms=[],
+                message="语义层未配置（缺 config/ontology.yaml），请直接按表名写 SQL。")
+        hits = ontology.browse(query)
+        if not hits:
+            return BrowseReply(
+                success=True, terms=[],
+                message=f"没有匹配的概念。已登记：{'、'.join(ontology.term_names)}")
+        return BrowseReply(
+            success=True, terms=[TermCard(id=t.id, name=t.name, definition=t.definition) for t in hits],
+            message=f"匹配到 {len(hits)} 个概念，调 resolve_term（传名字或 id）获取口径。")
+
+    @mcp.tool
+    async def resolve_term(term: str) -> ResolveReply:
+        """概念名/别名/id → 完整口径：落到哪个库哪个表哪个字段、怎么聚合
+        （aggregation）、业务过滤（filter）、粒度（grain），以及关联概念。
+        写 SQL 前先调这里——口径对了 SQL 才对。"""
+        hit = ontology.resolve(term)
+        if hit is None:
+            hint = "、".join(ontology.term_names) or "（语义层未配置）"
+            return ResolveReply(success=False,
+                                message=f"未登记的概念 {term!r}。已登记：{hint}")
+        return ResolveReply(
+            success=True, id=hit.id, name=hit.name, definition=hit.definition,
+            aliases=hit.aliases,
+            mappings=[MappingCard(**m.model_dump()) for m in hit.mappings],
+            relations=ontology.relations_of(hit),
+            message="口径如上。按 mappings 定位表字段，filter 拼进 WHERE，"
+                    "grain 提醒你一行是什么（决定要不要 DISTINCT）。")
 
     # ------------------------- http 模式：结果文件下载端点 -------------------------
     # 注意：FastMCP 的 LoggingMiddleware 只覆盖 MCP 协议调用（工具/资源/提示词），

@@ -156,6 +156,16 @@ class LoggingSettings(BaseModel):
     backup_count: int = 5            # 每个文件保留的历史份数（app.log.1 … .5）
 
 
+class OntologySettings(BaseModel):
+    """ontology 段：语义层文件位置。
+
+    文件缺失 = 语义层关闭（browse_terms / resolve_term 返回「未配置」），
+    不影响查询；文件内容校验见 ontology.py 的 load_ontology。
+    """
+
+    file: str = "config/ontology.yaml"   # 相对路径按项目根目录解析
+
+
 class Settings(BaseSettings):
     """整棵配置树。入口：Settings()——加载失败（缺环境变量/校验不过）直接抛。"""
 
@@ -168,6 +178,7 @@ class Settings(BaseSettings):
     results: ResultsSettings = Field(default_factory=ResultsSettings)
     databases: dict[str, DatabaseSettings] = Field(default_factory=dict)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    ontology: OntologySettings = Field(default_factory=OntologySettings)
 
     @classmethod
     def settings_customise_sources(
