@@ -48,6 +48,7 @@ from ontology import (
 )
 from settings import BASE_DIR, Settings
 from sql_guard import validate
+from trajectory import TrajectoryRecorder, build_recorder
 
 QUERY_LOG = logging.getLogger("QUERY_LOG")
 # 结果文件名固定是 uuid.csv，白名单外的名字一律拒绝——防路径穿越
@@ -73,6 +74,26 @@ class ToolReply(BaseModel):
     table: InlineTable | None = None
 
 
+class TrajSummary(BaseModel):
+    """export_trajectory 返回的一条轨迹概览。"""
+
+    task_id: str
+    database: str = ""
+    status: str = ""
+    rows: int = 0
+    sql: str = ""          # 截断到前 80 字符，完整 SQL 在轨迹文件里
+
+
+class TrajectoryReply(BaseModel):
+    """export_trajectory 的返回。"""
+
+    success: bool
+    message: str = ""
+    count: int = 0
+    dir: str = ""                              # 轨迹落盘目录（绝对路径）
+    trajectories: list[TrajSummary] = Field(default_factory=list)
+
+
 def _fail(message: str) -> ToolReply:
     return ToolReply(success=False, message=message)
 
@@ -80,8 +101,9 @@ def _fail(message: str) -> ToolReply:
 def build(settings: Settings | None = None, executor: QueryExecutor | None = None) -> FastMCP:
     """装配出完整的 FastMCP 实例（冒烟测试也走这里）。"""
     settings = settings or Settings()
-    executor = executor or QueryExecutor(settings)
     ontology = load_ontology(settings)   # 文件缺失=空语义层；内容不合法在这里就崩
+    recorder = build_recorder(settings, ontology.version)
+    executor = executor or QueryExecutor(settings, recorder=recorder)
     is_http = settings.server.transport == "http"
     download_base = settings.results.download_base_url.rstrip("/")
 
@@ -283,6 +305,30 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
             message="口径如上。按 mappings 定位表字段，filter 拼进 WHERE，"
                     "grain 提醒你一行是什么（决定要不要 DISTINCT）；"
                     "constraints 是该表已有的语义约束，block 级的别碰。")
+
+    @mcp.tool
+    async def export_trajectory(limit: int = 20) -> TrajectoryReply:
+        """导出最近 limit 条查询轨迹概览（EvoOntology rolling_trajectory 格式）。
+        每次 query_db_async 完成都会自动落一条轨迹 JSON 到 trajectories/ 目录，
+        供 /evoontology:evolve-ontology 等外部进化流程消费。
+        本工具返回轨迹概览（task_id/状态/SQL 摘要），完整内容在返回的 dir 目录里。"""
+        summaries = recorder.summaries(limit)
+        return TrajectoryReply(
+            success=True,
+            count=len(summaries),
+            dir=str(recorder.dir),
+            trajectories=[
+                TrajSummary(
+                    task_id=s["task_id"], database=s["database"], status=s["status"],
+                    rows=s["rows"], sql=s["sql"][:80],
+                )
+                for s in summaries
+            ],
+            message=(f"共 {len(summaries)} 条轨迹，完整 JSON 在 {recorder.dir}；"
+                     "每条 trajectory 含 task_id/question/ontology_version/"
+                     "native_tool_calls/task_status，可直接喂给 EvoOntology 的"
+                     " rolling_trajectory 进化流程（question 字段可由客户端补）。"),
+        )
 
     # ------------------------- http 模式：结果文件下载端点 -------------------------
     # 注意：FastMCP 的 LoggingMiddleware 只覆盖 MCP 协议调用（工具/资源/提示词），

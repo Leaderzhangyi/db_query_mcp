@@ -140,7 +140,8 @@ async def flow() -> None:
     mcp = build(s)
     async with Client(mcp) as client:
         tools = sorted(t.name for t in await client.list_tools())
-        assert tools == ["browse_terms", "get_query_db_async_result",
+        assert tools == ["browse_terms", "export_trajectory",
+                         "get_query_db_async_result",
                          "query_db_async", "resolve_term"], tools
 
         # 资源：可查的库 + 表清单（URI 模板）
@@ -390,6 +391,15 @@ async def ontology_flow() -> None:
                 break
             await asyncio.sleep(0.05)
         print("⑪ 语义层 OK：browse/resolve/资源 + 约束 warn 提示 / block 拦截")
+
+        # 轨迹：warn 查询已跑完，应有一条 SUCCESS 轨迹，字段对齐 EvoOntology
+        tr = await client.call_tool("export_trajectory", {"limit": 10})
+        assert tr.data.success and tr.data.count >= 1, tr.data
+        assert tr.data.trajectories[-1].status == "SUCCESS"
+        assert tr.data.trajectories[-1].sql and tr.data.trajectories[-1].database
+        traj_dir = Path(tr.data.dir)
+        assert traj_dir.is_dir() and any(traj_dir.glob("*.json"))
+        print("⑫ 轨迹 OK：查询自动落盘 + export_trajectory 导出概览，目录有 JSON")
 
 asyncio.run(ontology_flow())
 

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import database
 from settings import BASE_DIR, DatabaseSettings, Settings
+from trajectory import TrajectoryRecorder
 
 QUERY_LOG = logging.getLogger("QUERY_LOG")
 JANITOR_INTERVAL_SECONDS = 60
@@ -87,12 +88,14 @@ class QueryExecutor:
     工作协程在第一次 submit 时才启动——那时才一定有正在跑的事件循环。
     """
 
-    def __init__(self, settings: Settings, results_dir: Path | None = None):
+    def __init__(self, settings: Settings, results_dir: Path | None = None,
+                 recorder: TrajectoryRecorder | None = None):
         self._settings = settings
         self._query_cfg = settings.query
         self._results_cfg = settings.results
         self._results_dir = results_dir or (BASE_DIR / settings.results.dir)
         self._results_dir.mkdir(parents=True, exist_ok=True)
+        self._recorder = recorder
         self._store = TaskStore(
             max_tasks=self._query_cfg.max_tasks,
             ttl_seconds=self._query_cfg.task_ttl_minutes * 60,
@@ -194,6 +197,8 @@ class QueryExecutor:
             else:
                 self._store.finish(query_id, status="SUCCESS", rows=rows,
                                    elapsed_ms=elapsed_ms, file=result_file.name)
+            self._record_trajectory(query_id, sql, db_name, catalog,
+                                    "SUCCESS", rows=rows, elapsed_ms=elapsed_ms)
         except asyncio.CancelledError:
             # 服务关闭时的取消，不是查询失败：半截文件不留尸，取消信号继续上抛
             # （_worker 会重新抛出，事件循环才能干净收尾）
@@ -205,6 +210,21 @@ class QueryExecutor:
             reason = (str(e) or type(e).__name__).splitlines()[0]
             QUERY_LOG.warning("%s %s.%s 失败 原因=%s", query_id, db_name, catalog, reason)
             self._store.finish(query_id, status="FAILED", error=reason)
+            self._record_trajectory(query_id, sql, db_name, catalog,
+                                    "FAILED", error=reason)
+
+    def _record_trajectory(self, query_id: str, sql: str, db_name: str,
+                           catalog: str | None, status: str, *, rows: int = 0,
+                           error: str = "", elapsed_ms: int = 0) -> None:
+        """旁路落一条轨迹（EvoOntology rolling_trajectory 格式）。recorder 未配则跳过。"""
+        if self._recorder is None:
+            return
+        try:
+            self._recorder.record(
+                task_id=query_id, sql=sql, database=catalog or db_name,
+                status=status, rows=rows, error=error, elapsed_ms=elapsed_ms)
+        except OSError:
+            QUERY_LOG.exception("轨迹落盘失败（queryId %s）", query_id)   # 不影响查询结果
 
     async def _janitor_loop(self) -> None:
         while not self._stopped:

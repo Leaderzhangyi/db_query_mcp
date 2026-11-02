@@ -166,6 +166,17 @@ class OntologySettings(BaseModel):
     file: str = "config/ontology.yaml"   # 相对路径按项目根目录解析
 
 
+class TrajectorySettings(BaseModel):
+    """trajectory 段：查询轨迹记录（供 EvoOntology rolling_trajectory 进化）。
+
+    dir         轨迹落盘目录，每查询一条 trajectories/<query_id>.json
+    max_records 内存保留最近 N 条供 export_trajectory 导出；落盘全量
+    """
+
+    dir: str = "trajectories"           # 相对路径按项目根目录解析
+    max_records: int = 500
+
+
 class Settings(BaseSettings):
     """整棵配置树。入口：Settings()——加载失败（缺环境变量/校验不过）直接抛。"""
 
@@ -179,6 +190,7 @@ class Settings(BaseSettings):
     databases: dict[str, DatabaseSettings] = Field(default_factory=dict)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     ontology: OntologySettings = Field(default_factory=OntologySettings)
+    trajectory: TrajectorySettings = Field(default_factory=TrajectorySettings)
 
     @classmethod
     def settings_customise_sources(

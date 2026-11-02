@@ -46,6 +46,12 @@ results:
 ontology:
   file: config/ontology.yaml
 
+# 查询轨迹：每次查询落一条 trajectories/<query_id>.json（EvoOntology
+# rolling_trajectory 格式），供 export_trajectory 导出、外部进化流程消费。
+trajectory:
+  dir: trajectories
+  max_records: 500      # 内存保留最近 N 条供导出；落盘全量
+
 # 数据源实例：数据源 = 一套连接（多台主机一组），下挂多个库（catalogs）。
 # 常用布局：一个数据环境（stg1 / stg2 / dstg2 …）配一条数据源，数据源名用环境名；
 # 查询的 database 参数既可填环境名（落到该环境第一个库），也可填具体库名。
