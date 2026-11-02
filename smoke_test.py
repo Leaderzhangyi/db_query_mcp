@@ -366,6 +366,7 @@ async def ontology_flow() -> None:
         assert m.table == "orders" and m.column == "amount"
         assert "SUM" in m.aggregation and "PAID" in m.filter and m.grain
         assert r.data.relations and r.data.relations[0].other   # 关联概念用登记名
+        assert r.data.constraints and r.data.constraints[0].severity == "warn"  # 落点表的口径提醒
         r = await client.call_tool("resolve_term", {"term": "不存在的概念"})
         assert not r.data.success and "已登记" in r.data.message
 
@@ -374,7 +375,21 @@ async def ontology_flow() -> None:
         names = _json.loads((await client.read_resource("db://terms"))[0].text)
         assert any("已支付金额" in item for item in names), names
         assert any("订单量" in item for item in names), names
-        print("⑪ 语义层 OK：browse 名字/别名检索、resolve 口径解析、db://terms 资源")
+
+        # 语义约束：block 拦截敏感表（消息里给替代方案）；warn 放行但带口径提示
+        rb = await client.call_tool("query_db_async",
+                                    {"sql": "SELECT idcard FROM customers", "database": "demo"})
+        assert not rb.data.success and "语义约束拦截" in rb.data.message, rb.data.message
+        assert "orders.customer" in rb.data.message            # 拦截消息附替代路径
+        rw = await client.call_tool("query_db_async",
+                                    {"sql": "SELECT SUM(amount) FROM orders", "database": "demo"})
+        assert rw.data.success and "口径提示" in rw.data.message, rw.data.message
+        for _ in range(100):                          # 让 warn 查询跑完，别留到 shutdown 取消
+            rr = await client.call_tool("get_query_db_async_result", {"query_id": rw.data.data})
+            if not (rr.data.message and "仍在执行" in rr.data.message):
+                break
+            await asyncio.sleep(0.05)
+        print("⑪ 语义层 OK：browse/resolve/资源 + 约束 warn 提示 / block 拦截")
 
 asyncio.run(ontology_flow())
 

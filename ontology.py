@@ -10,8 +10,13 @@ config/ontology.yaml，通过两个 MCP 工具按需暴露（而不是整包塞 
                         怎么聚合、什么过滤、粒度是什么、有关联概念
 
 数据模型参考 EvoOntology（github.com/ruc-datalab/EvoOntology）的
-Term / Mapping / Relation 记录（其 Evidence / Constraint 与自进化机制
-暂不引入；轨迹证据见 trajectory.py 的导出，语义约束见 check_sql）。
+Term / Mapping / Relation / Constraint 记录（Evidence 与自进化机制暂不
+引入；轨迹证据见 trajectory.py 的导出）。
+
+语义约束（Constraint）挂在 query_db_async 的语法校验之后：
+语法守卫（sql_guard.py）管「安不安全」，check_sql() 管「口径对不对」——
+SQL 命中约束登记的表（可选：再命中指定列）时，warn 级附提示放行，
+block 级直接拦截并说明替代方案。
 
 加载规则（与 settings.py 同一哲学）：文件缺失 = 空语义层，工具照常
 注册、返回「未配置」，查询不受影响；文件存在但不合法 = 启动即报错，
@@ -22,8 +27,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import sqlglot
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from sqlglot import exp
 
 from settings import BASE_DIR, Settings
 
@@ -66,12 +73,35 @@ class RelationSpec(BaseModel):
     condition: str = ""       # 连接条件或合并说明
 
 
+class ConstraintSpec(BaseModel):
+    """语义约束：SQL 命中目标表（可选：再命中指定列）时触发。
+
+    典型用途：口径提醒（查金额表先想想要不要过滤 PENDING）和敏感数据
+    拦截（整表或某些列禁止直接查）。
+    """
+
+    id: str
+    table: str                            # 目标表名（匹配不区分大小写）
+    columns: list[str] = Field(default_factory=list)
+                                          # 空 = 该表任何查询都触发；非空 = 命中任一列才触发
+    severity: str = "warn"                # warn=提示并放行 | block=拦截
+    message: str = ""                     # 给 Agent 的口径说明/替代方案
+
+    @field_validator("severity")
+    @classmethod
+    def _severity_must_be(cls, v: str) -> str:
+        if v not in ("warn", "block"):
+            raise ValueError(f"severity 只能是 warn 或 block，当前是 {v!r}")
+        return v
+
+
 class OntologyDoc(BaseModel):
     """ontology.yaml 整文件。version 会写进导出的轨迹（对应 EvoOntology 的版本号）。"""
 
     version: str = "v0"
     terms: list[TermSpec] = Field(default_factory=list)
     relations: list[RelationSpec] = Field(default_factory=list)
+    constraints: list[ConstraintSpec] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -112,6 +142,13 @@ class RelationCard(BaseModel):
     condition: str = ""
 
 
+class ConstraintCard(BaseModel):
+    """resolve_term 附带的相关约束：写 SQL 前就知道哪里有雷。"""
+
+    severity: str             # warn | block
+    message: str
+
+
 class ResolveReply(BaseModel):
     success: bool
     message: str = ""
@@ -121,6 +158,7 @@ class ResolveReply(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     mappings: list[MappingCard] = Field(default_factory=list)
     relations: list[RelationCard] = Field(default_factory=list)
+    constraints: list[ConstraintCard] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -144,6 +182,7 @@ class OntologyStore:
                 self._lookup.setdefault(alias.lower(), term)
             self._lookup.setdefault(term.id.lower(), term)
         self._relations: list[RelationSpec] = list(doc.relations)
+        self._constraints: list[ConstraintSpec] = list(doc.constraints)
 
     def __bool__(self) -> bool:
         """空语义层（没配 yaml）按 False 处理，工具层据此返回「未配置」。"""
@@ -194,6 +233,39 @@ class OntologyStore:
                 other = self._name_of.get(rel.source, rel.source)
                 cards.append(RelationCard(other=other, type=rel.type, condition=rel.condition))
         return cards
+
+    def constraints_of(self, term: TermSpec) -> list[ConstraintCard]:
+        """概念落点表上的约束：resolve 时一并给出，Agent 写 SQL 前就知道。"""
+        tables = {m.table.lower() for m in term.mappings}
+        return [ConstraintCard(severity=c.severity, message=c.message)
+                for c in self._constraints if c.table.lower() in tables]
+
+    def check_sql(self, sql: str, dialect: str = "mysql") -> tuple[list[str], list[str]]:
+        """语义约束检查：返回 (block 列表, warn 列表)，均为人话消息。
+
+        用 sqlglot 解析出 SQL 里引用的表和列再匹配（不靠正则猜）。
+        语法问题不归这里管——此函数在 sql_guard.validate 之后调用，
+        解析失败（理论上到不了这）直接放行。
+        """
+        if not self._constraints:
+            return [], []
+        try:
+            stmt = sqlglot.parse_one(sql, read=dialect)
+        except sqlglot.errors.ParseError:
+            return [], []
+        tables = {t.name.lower() for t in stmt.find_all(exp.Table)}
+        columns = {c.name.lower() for c in stmt.find_all(exp.Column)}
+        blocks: list[str] = []
+        warns: list[str] = []
+        for c in self._constraints:
+            if c.table.lower() not in tables:
+                continue
+            # columns 非空 = 还要命中其中任一列才算触及约束
+            if c.columns and not ({col.lower() for col in c.columns} & columns):
+                continue
+            line = f"[{c.id}] {c.message}" if c.message else f"[{c.id}] 表 {c.table} 有语义约束"
+            (blocks if c.severity == "block" else warns).append(line)
+        return blocks, warns
 
 
 # ============================================================================

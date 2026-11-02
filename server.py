@@ -191,6 +191,8 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
         """异步执行只读 SQL，立即返回查询ID。
         database 填 db://databases 资源里的环境名（如 dstg2）或具体库名，
         留空用默认环境。
+        SQL 会先过语法守卫（只读单条 SELECT）再过语义约束检查
+        （敏感表/口径提醒，命中 block 会被拦截并附替代方案）。
         结果策略：小结果（约 5 行以内）会在 get_query_db_async_result 里直接展示；
         更大的落成 CSV 文件给下载链接。
         用法：① 拿到 queryId；② 调 get_query_db_async_result 查状态。"""
@@ -199,17 +201,25 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
             safe_sql = validate(sql, dialect=db.dialect)
         except ValueError as e:
             return _fail(f"{e}\n请修正后重试。")
+        # 语义约束：语法守卫管「安不安全」，这里管「口径对不对」——
+        # block 拦下并给替代方案；warn 放行但随回执带上口径提示
+        blocks, warns = ontology.check_sql(safe_sql, dialect=db.dialect)
+        if blocks:
+            QUERY_LOG.warning("语义拦截 database=%s sql=%.80s 原因=%s",
+                              database, sql, "；".join(blocks))
+            return _fail(f"语义约束拦截：{'；'.join(blocks)}\n请按提示调整 SQL。")
         try:
             query_id = await executor.submit(safe_sql, db_name, db, catalog)
         except asyncio.QueueFull:
             return _fail(f"当前排队已满（queue_size={settings.query.queue_size}），"
                          "请稍后重试，不要重复提交。")
         await ctx.info(f"查询已提交（{db_name}.{catalog}）")   # 实时消息直达客户端
+        warn_text = f"\n口径提示：{'；'.join(warns)}" if warns else ""
         return ToolReply(
             success=True,
             data=query_id,
             message=f"查询已提交，queryId={query_id}。"
-                    "稍后调用 get_query_db_async_result 传入该 queryId 获取结果。")
+                    "稍后调用 get_query_db_async_result 传入该 queryId 获取结果。" + warn_text)
 
     @mcp.tool
     async def get_query_db_async_result(query_id: str, *, ctx: Context) -> ToolReply:
@@ -269,8 +279,10 @@ def build(settings: Settings | None = None, executor: QueryExecutor | None = Non
             aliases=hit.aliases,
             mappings=[MappingCard(**m.model_dump()) for m in hit.mappings],
             relations=ontology.relations_of(hit),
+            constraints=ontology.constraints_of(hit),
             message="口径如上。按 mappings 定位表字段，filter 拼进 WHERE，"
-                    "grain 提醒你一行是什么（决定要不要 DISTINCT）。")
+                    "grain 提醒你一行是什么（决定要不要 DISTINCT）；"
+                    "constraints 是该表已有的语义约束，block 级的别碰。")
 
     # ------------------------- http 模式：结果文件下载端点 -------------------------
     # 注意：FastMCP 的 LoggingMiddleware 只覆盖 MCP 协议调用（工具/资源/提示词），

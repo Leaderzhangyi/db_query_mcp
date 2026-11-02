@@ -194,9 +194,15 @@ class QueryExecutor:
             else:
                 self._store.finish(query_id, status="SUCCESS", rows=rows,
                                    elapsed_ms=elapsed_ms, file=result_file.name)
+        except asyncio.CancelledError:
+            # 服务关闭时的取消，不是查询失败：半截文件不留尸，取消信号继续上抛
+            # （_worker 会重新抛出，事件循环才能干净收尾）
+            result_file.unlink(missing_ok=True)
+            raise
         except BaseException as e:          # 任何漏网异常都不能让任务永远停在 RUNNING
             result_file.unlink(missing_ok=True)   # 半截文件不留尸
-            reason = str(e).splitlines()[0]
+            # 部分异常（如某些底层错误）str() 是空串，退回到类型名，splitlines()[0] 才不会越界
+            reason = (str(e) or type(e).__name__).splitlines()[0]
             QUERY_LOG.warning("%s %s.%s 失败 原因=%s", query_id, db_name, catalog, reason)
             self._store.finish(query_id, status="FAILED", error=reason)
 

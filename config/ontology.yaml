@@ -1,7 +1,9 @@
-# 语义层：业务概念 → 表/字段映射 + 指标口径 + 概念关联。
+# 语义层：业务概念 → 表/字段映射 + 指标口径 + 概念关联 + 语义约束。
 # 由工具 browse_terms（按自然语言找概念）/ resolve_term（拿完整口径）暴露给 Agent；
 # 提示词 query-assistant 也会附上概念清单，引导 Agent 先查口径再写 SQL。
-# 数据模型参考 EvoOntology（github.com/ruc-datalab/EvoOntology）的 Term/Mapping/Relation。
+# constraints 在 query_db_async 提交时检查——warn 附提示放行，block 直接拦截。
+# 数据模型参考 EvoOntology（github.com/ruc-datalab/EvoOntology）的
+# Term/Mapping/Relation/Constraint。
 #
 # 维护口径：
 #   - aliases 收全业务里的各种说法（口径检索主要靠它）
@@ -55,3 +57,19 @@ relations:
     target: term_order_count
     type: same_table
     condition: 同在 orders 表，customer 字段即客户维度
+
+# 语义约束：SQL 命中 table（columns 非空时还要命中任一列）即触发。
+#   warn  = 口径提醒，随查询回执附给 Agent
+#   block = 直接拦截，message 里要写替代方案
+constraints:
+  - id: c_amount_caliber       # 口径提醒：金额要区分是否过滤 PENDING
+    table: orders
+    columns: [amount]
+    severity: warn
+    message: 金额口径——status='PAID' 才是实付；问"金额"先确认是否排除
+      PENDING（登记概念「已支付金额」有现成口径）
+  - id: c_idcard_sensitive     # 敏感字段：整表拦截，给替代路径
+    table: customers
+    severity: block
+    message: customers 表含身份证号等敏感字段，禁止直接查询；客户维度
+      分析请改用 orders.customer 聚合（登记概念「客户数」）
