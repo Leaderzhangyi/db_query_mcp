@@ -150,6 +150,20 @@ MCP_ENV=prod python server.py # 生产（银行 MySQL，凭据走环境变量占
 
 ## 怎么维护语义层
 
+### 不想从零写？结构部分自动起草
+
+```bash
+python draft_ontology.py            # 当前环境 → config/ontology.draft.yaml
+python draft_ontology.py dstg2      # 指定环境/库
+```
+
+表、字段、注释自动从 schema 拉好（mysql 的表/列注释会带进 definition，
+银行库的注释通常就是业务口径的原料），口径三件套留 TODO——人填空，
+或连同 `trajectories/` 一起交给 LLM 起草。草稿**永不覆盖**正式文件，
+审过再合并。
+
+### 手工登记
+
 往 `config/ontology.yaml` 加概念即可（yaml 有完整注释）：
 
 ```yaml
@@ -183,9 +197,25 @@ constraints:
 （`task_id / question / ontology_version / native_tool_calls / task_status / errors …`），
 `split` 固定为 `rolling_trajectory`——没有固定测试集的生产 workload 也能进化。
 
-`export_trajectory` 随时导出概览；跑一段时间后，把 `trajectories/` 目录交给
-EvoOntology 的 evolve 流程，它按真实执行轨迹诊断「模型在哪类概念上反复踩坑」，
-反向提出 Term/Mapping/Constraint 的增补建议——这就是语义层的自我进化闭环。
+闭环的完整循环（「自我」指的是这个循环里人只审最后一眼）：
+
+```
+ontology.yaml ──指导──> 查询 ──自动落──> trajectories/
+     ▲                                        │
+     │                          ① 诊断：哪类问题反复失败？哪个表反复触发 warn？
+  ④ 人审 diff，合并                          │
+     │                              ② LLM 起草增补（Claude / EvoOntology）
+     └── ③ 提议的口径跑验证 SQL，通过才写回 <──┘
+```
+
+实际操作任选其一：
+
+- **Claude 会话内进化**：跑一段时间后，把 `config/ontology.draft.yaml`
+  （`draft_ontology.py` 生成）+ `trajectories/` 目录一起丢给 Claude——
+  诊断轨迹、起草 Term/Constraint 增补、对每个提议给验证 SQL，你审完合并。
+- **交给 EvoOntology**：`claude plugin marketplace add ruc-datalab/EvoOntology`，
+  用它的 `/evoontology:evolve-ontology` 跑同样的循环（配对评估 + 门控发布
+  ontology_vN+1），本项目的轨迹格式与其兼容。
 
 ## 项目结构
 
@@ -197,6 +227,7 @@ executor.py      查询执行：任务表 / asyncio 任务池 / CSV 流式落盘
 sql_guard.py     语法守卫：单条只读 SELECT（sqlglot AST 级判断）
 ontology.py      语义层：Term/Mapping/Relation/Constraint + 检索 + 约束检查
 trajectory.py    轨迹：EvoOntology 格式落盘 + 概览导出
+draft_ontology.py 语义层起草器：schema+注释 → 草稿 yaml（口径留 TODO）
 config/          config.yaml（主）+ config.{env}.yaml（覆盖）+ ontology.yaml（口径）
 smoke_test.py    冒烟测试 ⑫ 段：配置/守卫/全流程/池/下载/日志/语义/轨迹
 ```
