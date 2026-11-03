@@ -377,11 +377,32 @@ async def ontology_flow() -> None:
         assert any("已支付金额" in item for item in names), names
         assert any("订单量" in item for item in names), names
 
+        # 银行口径：五级分类后三类才是不良；查询银行表同样带口径提示
+        r = await client.call_tool("resolve_term", {"term": "不良贷款余额"})
+        assert r.data.success and r.data.mappings[0].table == "loan_iou_info", r.data
+        assert "次级" in r.data.mappings[0].filter
+        rn = await client.call_tool("query_db_async", {
+            "sql": "SELECT five_class, COUNT(*) AS cnt, ROUND(SUM(balance), 2) AS bal "
+                   "FROM loan_iou_info WHERE five_class IN ('次级','可疑','损失') "
+                   "GROUP BY five_class",
+            "database": "demo"})
+        assert rn.data.success and "口径提示" in rn.data.message, rn.data.message
+        for _ in range(100):
+            rr = await client.call_tool("get_query_db_async_result",
+                                        {"query_id": rn.data.data})
+            if not (rr.data.message and "仍在执行" in rr.data.message):
+                break
+            await asyncio.sleep(0.05)
+        assert rr.data.success and rr.data.table is not None, rr.data.message
+
         # 语义约束：block 拦截敏感表（消息里给替代方案）；warn 放行但带口径提示
         rb = await client.call_tool("query_db_async",
                                     {"sql": "SELECT idcard FROM customers", "database": "demo"})
         assert not rb.data.success and "语义约束拦截" in rb.data.message, rb.data.message
         assert "orders.customer" in rb.data.message            # 拦截消息附替代路径
+        rb2 = await client.call_tool("query_db_async",
+                                     {"sql": "SELECT cert_no FROM cust_info", "database": "demo"})
+        assert not rb2.data.success and "敏感" in rb2.data.message
         rw = await client.call_tool("query_db_async",
                                     {"sql": "SELECT SUM(amount) FROM orders", "database": "demo"})
         assert rw.data.success and "口径提示" in rw.data.message, rw.data.message

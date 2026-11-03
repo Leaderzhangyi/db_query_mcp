@@ -127,7 +127,7 @@ trajectories/<query_id>.json     ⑤ 自动落轨迹（EvoOntology 格式，供�
 
 ```bash
 pip install -r requirements.txt
-python make_demo_db.py        # 生成本地演示库（orders 50 行 + customers 30 行）
+python make_demo_db.py        # 生成演示库：14 张表约 4700 行（零售银行全套）
 python smoke_test.py          # 冒烟 ⑫ 段，全绿即就绪
 python server.py              # dev 默认 http://localhost:9000/mcp
 MCP_ENV=prod python server.py # 生产（银行 MySQL，凭据走环境变量占位符）

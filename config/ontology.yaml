@@ -9,9 +9,10 @@
 #   - aliases 收全业务里的各种说法（口径检索主要靠它）
 #   - filter 写业务过滤条件原文（Agent 会照着拼进 SQL 的 WHERE）
 #   - database 与 query_db_async 的 database 参数同口径：环境名或库名
-version: demo-v1
+version: demo-v2
 
 terms:
+  # ---- 基础演示概念（orders/customers）----
   - id: term_order_count
     name: 订单量
     aliases: [订单总数, 下单量]
@@ -48,7 +49,70 @@ terms:
         filter: ""
         grain: 一单一行
 
+  # ---- 银行零售概念（12 张业务表）----
+  - id: term_npl_balance
+    name: 不良贷款余额
+    aliases: [不良余额, NPL余额, 后三类贷款余额]
+    definition: 五级分类为次级/可疑/损失的借据贷款余额合计（后三类）
+    mappings:
+      - database: demo
+        table: loan_iou_info
+        column: balance
+        aggregation: SUM(balance)
+        filter: "five_class IN ('次级','可疑','损失')"
+        grain: 一借据一行
+
+  - id: term_dep_balance
+    name: 个人存款余额
+    aliases: [存款规模, 储蓄存款余额, 存款余额]
+    definition: 状态正常存款账户的账面余额合计（含冻结部分）
+    mappings:
+      - database: demo
+        table: dp_acct
+        column: balance
+        aggregation: SUM(balance)
+        filter: "acct_status = '正常'"
+        grain: 一账户一行
+
+  - id: term_wm_hold_balance
+    name: 理财持有余额
+    aliases: [理财规模, 在途理财金额, 理财余额]
+    definition: 状态为持有中的理财产品持有余额合计（不含已赎回）
+    mappings:
+      - database: demo
+        table: cust_wm_hold
+        column: hold_balance
+        aggregation: SUM(hold_balance)
+        filter: "wm_status = '持有中'"
+        grain: 一笔持有一行
+
+  - id: term_ftp_net
+    name: FTP净收益
+    aliases: [FTP利润, 内部资金净收益]
+    definition: FTP收入减FTP成本（行内资金转移定价口径），按统计月累计
+    mappings:
+      - database: demo
+        table: ftp_detail
+        column: ftp_income
+        aggregation: SUM(ftp_income) - SUM(ftp_cost)
+        filter: ""
+        grain: 一业务对象一月一行
+
+  - id: term_overdue_balance
+    name: 逾期贷款余额
+    aliases: [逾期余额, 逾期本金]
+    definition: 逾期天数大于 0 的借据贷款余额合计——口径与「不良」不同：
+      关注类也可能逾期，但不属不良（见概念「不良贷款余额」）
+    mappings:
+      - database: demo
+        table: loan_iou_info
+        column: balance
+        aggregation: SUM(balance)
+        filter: "overdue_days > 0"
+        grain: 一借据一行
+
 relations:
+  # ---- 基础演示 ----
   - source: term_order_count
     target: term_paid_amount
     type: same_table
@@ -57,6 +121,21 @@ relations:
     target: term_order_count
     type: same_table
     condition: 同在 orders 表，customer 字段即客户维度
+  # ---- 银行零售：客户维度跨表关联 ----
+  - source: term_npl_balance
+    target: term_dep_balance
+    type: cross_table
+    condition: 同一客户双维度——loan_iou_info.cust_id = dp_acct.cust_id，
+      可按 cust_id 汇总做存贷联动分析
+  - source: term_dep_balance
+    target: term_wm_hold_balance
+    type: cross_table
+    condition: dp_acct.cust_id = cust_wm_hold.cust_id，存款/理财客户交叉分析
+  - source: term_npl_balance
+    target: term_overdue_balance
+    type: same_table
+    condition: 同在 loan_iou_info——不良按五级分类，逾期按 overdue_days，
+      两个口径不等价（关注类可逾期但不属不良）
 
 # 语义约束：SQL 命中 table（columns 非空时还要命中任一列）即触发。
 #   warn  = 口径提醒，随查询回执附给 Agent
@@ -73,3 +152,23 @@ constraints:
     severity: block
     message: customers 表含身份证号等敏感字段，禁止直接查询；客户维度
       分析请改用 orders.customer 聚合（登记概念「客户数」）
+
+  # ---- 银行零售约束 ----
+  - id: c_cert_no_sensitive    # 敏感字段：证件号/手机号，命中列才拦
+    table: cust_info
+    columns: [cert_no, mobile]
+    severity: block
+    message: cust_info 的证件号/手机号是敏感字段，禁止直接查询；客户
+      维度统计请按 cust_id 聚合
+  - id: c_iou_balance_caliber  # 口径提醒：余额有五级分类维度
+    table: loan_iou_info
+    columns: [balance]
+    severity: warn
+    message: 贷款余额口径——不良只算后三类（见概念「不良贷款余额」）、
+      逾期按 overdue_days（见「逾期贷款余额」），结清借据 balance=0 自然排除
+  - id: c_dep_balance_caliber  # 口径提醒：账面 vs 可用
+    table: dp_acct
+    columns: [balance, avail_balance]
+    severity: warn
+    message: 存款余额口径——balance 为账面余额（含冻结），avail_balance
+      为可用余额；问「存款规模」通常用 balance（见概念「个人存款余额」）

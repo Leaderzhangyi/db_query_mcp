@@ -1,6 +1,7 @@
 # 查询结果与本地数据库文件
 results/
 trajectories/
+config/ontology.draft.yaml
 *.db
 *.sqlite
 *.sqlite3
