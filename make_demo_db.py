@@ -29,7 +29,7 @@ CREATE TABLE customers(
 """)
 conn.executemany(
     "INSERT INTO orders VALUES(?, ?, ?, ?)",
-    [(i, f"客户{i % CUSTOMERS + 1}", i * 13.5, "PENDING" if i % 400 == 0 else "PAID")
+    [(i, f"客户{i % CUSTOMERS + 1}", i * 13.5, "PENDING" if i % 9 == 0 else "PAID")
      for i in range(1, TOTAL_ROWS + 1)],
 )
 conn.executemany(
