@@ -1,0 +1,13 @@
+# stdio 模式：被 MCP 客户端（Cursor / VS Code / Cline / Cherry Studio 等）
+# 以子进程拉起，走标准输入输出，不监听端口、不需要 download_base_url。
+# 库与 dev 相同（本地 sqlite 演示库）；接真实环境时按 config.prod.yaml 抄
+# databases 段即可。
+
+server:
+  transport: stdio
+
+databases:
+  demo:
+    dialect: sqlite
+    path: demo.db          # 相对路径按项目目录解析
+    catalogs: [ demo ]

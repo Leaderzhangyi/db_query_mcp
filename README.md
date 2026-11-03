@@ -146,7 +146,49 @@ MCP_ENV=prod python server.py # 生产（银行 MySQL，凭据走环境变量占
 | `trajectory` | 轨迹目录与内存保留条数 |
 | `logging` | 双文件日志：app.log 全量 + error.log 只收 WARNING 以上 |
 
-环境差异放 `config.{MCP_ENV}.yaml` 覆盖层（dev=sqlite 演示 / prod=银行 mysql），支持 `${VAR}` 占位符从环境变量注入凭据。
+环境差异放 `config.{MCP_ENV}.yaml` 覆盖层（dev=sqlite 演示 / stdio=被客户端拉起 / prod=银行 mysql），支持 `${VAR}` 占位符从环境变量注入凭据。
+
+## 接入其他 Agent（stdio 模式）
+
+stdio 模式下 MCP 客户端把本服务作为子进程拉起，走标准输入输出，不监听端口。
+所有支持 stdio 的客户端用同一份配置（注意 `command` 与脚本路径都用**绝对路径**——
+图形客户端常不继承终端的 PATH）：
+
+```json
+{
+  "mcpServers": {
+    "db-query": {
+      "command": "D:/anaconda3/python.exe",
+      "args": ["C:/Users/ZinkCas/Desktop/学习mcp/db_query_mcp/server.py"],
+      "env": { "MCP_ENV": "stdio" }
+    }
+  }
+}
+```
+
+| 客户端 | 配置放哪 |
+|---|---|
+| **Claude Code** | 项目根 `.mcp.json`；或命令行（见下） |
+| **Cursor** | 项目 `.cursor/mcp.json`；全局 `~/.cursor/mcp.json` |
+| **VS Code (Copilot)** | 项目 `.vscode/mcp.json` |
+| **Cline / Roo Code** | 其设置页的 `cline_mcp_settings.json` |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+| **Cherry Studio 等图形客户端** | 设置 → MCP → 添加：类型 stdio、命令/参数/环境变量照上表填 |
+
+Claude Code 一条命令接入：
+
+```bash
+claude mcp add db-query --env MCP_ENV=stdio -- D:/anaconda3/python.exe "C:/Users/ZinkCas/Desktop/学习mcp/db_query_mcp/server.py"
+```
+
+说明：
+
+- `MCP_ENV=stdio` 选用 `config/config.stdio.yaml` 覆盖层（transport=stdio + 演示库）。
+  接真实库就把该文件的 `databases` 段换成目标环境（凭据用 `${VAR}` 占位符）。
+- 脚本内部一切路径锚定项目目录（`BASE_DIR`），客户端从哪个 cwd 拉起都无所谓。
+- stdio 模式没有下载端点：小结果内联回复，大结果给 `results/` 下的文件路径。
+- 日志走 stderr + `logs/` 文件，不污染 stdout 协议通道。
+- 多客户端共享同一实例时改用 http 模式（dev 已内置，`http://localhost:9000/mcp`）。
 
 ## 怎么维护语义层
 

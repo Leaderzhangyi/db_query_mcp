@@ -17,8 +17,9 @@ FastMCP 特性的落点：
   ontology.py   语义层（业务概念→表字段口径，config/ontology.yaml）
   server.py     本文件：装配 + 入口
 
-运行：python server.py            （默认 dev：stdio）
-      MCP_ENV=prod python server.py（prod：http，监听 server.port）
+运行：python server.py              （MCP_ENV 未设 = dev：http，监听 9000）
+      MCP_ENV=stdio python server.py（stdio：被 MCP 客户端拉起，见 config.stdio.yaml）
+      MCP_ENV=prod python server.py （prod：银行 mysql + http）
 """
 from __future__ import annotations
 
